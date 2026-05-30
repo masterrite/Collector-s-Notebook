@@ -30,7 +30,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: collector.exe
             asset: collector-windows-x86_64.exe
-          - os: macos-latest
+          - os: macos-15-intel
             target: aarch64-apple-darwin       # Apple Silicon (M1+)
             artifact: collector
             asset: collector-macos-arm64
