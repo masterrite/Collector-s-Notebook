@@ -1,0 +1,115 @@
+name: Build
+
+# Build native binaries for Windows, macOS, and Linux.
+#
+# Triggers:
+#   - on every push to main / pull request: builds all three (CI check)
+#   - on pushing a version tag like v0.6.0: builds all three AND attaches
+#     the binaries to a GitHub Release.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # allows manual "Run workflow" button in the Actions tab
+
+# Needed so the release job can create a Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: collector.exe
+            asset: collector-windows-x86_64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin       # Apple Silicon (M1+)
+            artifact: collector
+            asset: collector-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin        # Intel Macs
+            artifact: collector
+            asset: collector-macos-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: collector
+            asset: collector-linux-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache cargo registry + build output to speed up subsequent runs.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.target }}-cargo-
+
+      # Linux needs system libraries for the GUI (Slint/winit), font rendering,
+      # and the rfd native file dialog (GTK).
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Rename the built binary to a platform-specific name before uploading.
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "dist/${{ matrix.asset }}"
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "dist/${{ matrix.asset }}"
+
+      # Upload each platform's binary as a workflow artifact (downloadable from
+      # the run's summary page, even for non-tag builds).
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+      # When the build was triggered by a version tag, attach the binary to a
+      # GitHub Release (created automatically if it doesn't exist yet).
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset }}
+          fail_on_unmatched_files: true
