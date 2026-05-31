@@ -27,20 +27,20 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: Collector-rs.exe
-            asset: Collector-rs-windows-x86_64.exe
+            artifact: Collector.exe
+            asset: Collector-windows-x86_64.exe
           - os: macos-latest
             target: aarch64-apple-darwin       # Apple Silicon (M1+)
-            artifact: Collector-rs
-            asset: Collector-rs-macos-arm64.dmg
+            artifact: Collector
+            asset: Collector-macos-arm64.dmg
           - os: macos-15-intel
             target: x86_64-apple-darwin         # Intel Macs
-            artifact: Collector-rs
-            asset: Collector-rs-macos-x86_64.dmg
+            artifact: Collector
+            asset: Collector-macos-x86_64.dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: Collector-rs
-            asset: Collector-rs-linux-x86_64
+            artifact: Collector
+            asset: Collector-linux-x86_64
 
     steps:
       - name: Checkout
@@ -102,7 +102,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          APP="Collector-rs.app"
+          APP="Collector.app"
           mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
           cat > "${APP}/Contents/Info.plist" <<PLIST
@@ -110,10 +110,10 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>CFBundleName</key>             <string>Collector-rs</string>
+            <key>CFBundleName</key>             <string>Collector</string>
             <key>CFBundleDisplayName</key>      <string>Collector</string>
             <key>CFBundleExecutable</key>       <string>${{ matrix.artifact }}</string>
-            <key>CFBundleIdentifier</key>       <string>com.example.Collector-rs</string>
+            <key>CFBundleIdentifier</key>       <string>com.example.Collector</string>
             <key>CFBundlePackageType</key>      <string>APPL</string>
             <key>LSMinimumSystemVersion</key>   <string>10.13</string>
             <key>NSHighResolutionCapable</key>  <true/>
@@ -132,7 +132,7 @@ jobs:
           STAGE="$(mktemp -d)"
           cp -R "${APP}" "${STAGE}/"
           ln -s /Applications "${STAGE}/Applications"
-          hdiutil create -volname "Collector-rs" \
+          hdiutil create -volname "Collector" \
             -srcfolder "${STAGE}" -ov -format UDZO \
             "dist/${{ matrix.asset }}"
 
