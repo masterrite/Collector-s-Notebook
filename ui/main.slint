@@ -28,6 +28,12 @@ export struct FieldData {
     value: string,
 }
 
+export struct PhotoData {
+    index: int,
+    is-main: bool,
+    thumbnail: image,
+}
+
 export struct TemplateData {
     id: string,
     name: string,
@@ -98,9 +104,11 @@ component SectionLabel {
     height: 22px;
     Text {
         text: root.text;
+        width: 100%;
         font-size: max(9px, Theme.ui-font-size - 4px);
         letter-spacing: 1.5px; color: Theme.text-muted;
         font-weight: 600; vertical-alignment: center;
+        horizontal-alignment: center;
     }
 }
 
@@ -123,7 +131,7 @@ component SmallBtn {
             text: root.label;
             font-family: "Segoe UI Emoji";
             font-size: Theme.ui-font-size - 2px;
-            width: parent.width; height: parent.height;
+            width: 100%; height: 100%;
             color: root.active ? #fff
                  : (t.has-hover ? (root.danger ? Theme.danger-text : Theme.text-primary)
                                 : Theme.text-secondary);
@@ -678,7 +686,22 @@ component SettingsPanel {
 
 component PhotoLightbox {
     in property <image> photo;
+    in property <int> index;
+    in property <int> count;
     callback close();
+    callback prev();
+    callback next();
+
+    forward-focus: lb-keys;
+    lb-keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(e) => {
+            if (e.text == Key.Escape) { root.close(); accept }
+            else if (e.text == Key.LeftArrow) { root.prev(); accept }
+            else if (e.text == Key.RightArrow) { root.next(); accept }
+            else { reject }
+        }
+    }
 
     TouchArea {
         width: parent.width; height: parent.height;
@@ -699,12 +722,47 @@ component PhotoLightbox {
         image-fit: contain;
     }
 
+    // Previous button (only if more than one photo)
+    if root.count > 1: prev-t := TouchArea {
+        x: 16px; y: parent.height / 2 - 28px;
+        width: 44px; height: 56px;
+        clicked => { root.prev(); }
+        Rectangle {
+            border-radius: 8px;
+            background: prev-t.has-hover ? #ffffff35 : #ffffff18;
+            Text { text: "‹"; font-size: 30px; color: #fff; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+    // Next button
+    if root.count > 1: next-t := TouchArea {
+        x: parent.width - 60px; y: parent.height / 2 - 28px;
+        width: 44px; height: 56px;
+        clicked => { root.next(); }
+        Rectangle {
+            border-radius: 8px;
+            background: next-t.has-hover ? #ffffff35 : #ffffff18;
+            Text { text: "›"; font-size: 30px; color: #fff; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+
+    // Counter "2 / 5"
+    if root.count > 1: Rectangle {
+        x: parent.width / 2 - 30px; y: parent.height - 44px;
+        width: 60px; height: 26px;
+        border-radius: 13px; background: #00000088;
+        Text { text: (root.index + 1) + " / " + root.count; font-size: 13px; color: #fff;
+               horizontal-alignment: center; vertical-alignment: center; }
+    }
+
     // Close hint
-    Rectangle {
+    close-t := TouchArea {
         x: parent.width - 60px; y: 12px;
         width: 48px; height: 28px;
-        border-radius: 6px; background: #ffffff20;
-        Text { text: "×"; font-size: 15px; color: #fff; horizontal-alignment: center; vertical-alignment: center; }
+        clicked => { root.close(); }
+        Rectangle {
+            border-radius: 6px; background: close-t.has-hover ? #ffffff35 : #ffffff20;
+            Text { text: "×"; font-size: 15px; color: #fff; horizontal-alignment: center; vertical-alignment: center; }
+        }
     }
 }
 
@@ -788,7 +846,7 @@ component CollectionRow {
                         Text {
                             text: root.data.icon;
                             font-family: "Segoe UI Emoji";
-                            font-size: 16px;
+                            font-size: Theme.ui-font-size + 2px;
                             width: parent.width; height: parent.height;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
@@ -853,10 +911,11 @@ component ItemCard {
         background: root.selected ? Theme.bg-selected : (t.has-hover ? Theme.bg-card-hover : Theme.bg-card);
         border-width: 1px;
         border-color: root.selected ? Theme.border-accent : Theme.border;
+        clip: true;
         animate background { duration: 140ms; }
 
         HorizontalLayout {
-            padding: 10px; spacing: 10px; alignment: start;
+            padding: 10px; spacing: 10px;
 
             // Checkbox slot — always reserves space in multi-select mode
             if root.multi-select-mode: Rectangle {
@@ -895,10 +954,17 @@ component ItemCard {
                     overflow: elide;
                     color: root.selected ? Theme.text-primary : Theme.text-secondary;
                 }
-                Text {
-                    text: root.data.short-desc;
-                    font-size: max(10px, Theme.ui-font-size - 2px);
-                    color: Theme.text-muted; overflow: elide; wrap: no-wrap;
+                Rectangle {
+                    height: max(10px, Theme.ui-font-size - 2px) * 2.5;
+                    clip: true;
+                    Text {
+                        text: root.data.short-desc;
+                        font-size: max(10px, Theme.ui-font-size - 2px);
+                        color: Theme.text-muted;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        x: 0; y: 0; width: parent.width;
+                    }
                 }
             }
         }
@@ -972,6 +1038,235 @@ component NameInputModal {
     }
 }
 
+// Large multiline field editor (for description and long custom fields)
+component FieldEditorModal {
+    in property <string> title;
+    in-out property <string> value;
+    in property <int> word-count: 0;
+    in property <int> word-limit: 200;
+    callback accepted(string);
+    callback close();
+    callback text-edited(string);
+
+    property <length> mw: 460px;
+    property <length> mh: 360px;
+
+    init => { fe.focus(); }
+
+    TouchArea {
+        width: parent.width; height: parent.height;
+        clicked => { root.close(); }
+    }
+
+    panel := Rectangle {
+        x: (parent.width  - root.mw) / 2;
+        y: (parent.height - root.mh) / 2;
+        width: root.mw; height: root.mh;
+        border-radius: 12px; background: Theme.bg-panel;
+        border-width: 1px; border-color: Theme.border;
+        drop-shadow-blur: 24px; drop-shadow-color: #00000050;
+
+        TouchArea { width: parent.width; height: parent.height; }
+
+        VerticalLayout {
+            padding: 18px; spacing: 12px;
+
+            Text { text: root.title; font-size: Theme.ui-font-size; font-weight: 700; color: Theme.text-primary; }
+
+            // Tall scrollable editing area — custom scroll
+            root2 := Rectangle {
+                vertical-stretch: 1;
+                border-radius: 6px;
+                background: Theme.bg-input; border-width: 1px; border-color: Theme.accent-dim;
+                clip: true;
+
+                property <length> content-h: fe.preferred-height;
+                property <length> view-h: self.height - 8px;
+                property <length> max-scroll: max(0px, root2.content-h - root2.view-h);
+                property <length> scroll-y: 0px;
+
+                // I-beam cursor over the editor area (sits behind the text input)
+                ibeam := TouchArea {
+                    width: parent.width; height: parent.height;
+                    mouse-cursor: text;
+                    clicked => { fe.focus(); }
+                }
+
+                // Moving wrapper holds the TextInput; we shift the wrapper, not the input
+                Rectangle {
+                    x: 8px; y: 4px - root2.scroll-y;
+                    width: parent.width - 22px;
+                    height: max(root2.content-h, root2.view-h);
+                    fe := TextInput {
+                        width: parent.width; height: parent.height;
+                        text <=> root.value;
+                        font-size: Theme.ui-font-size; color: Theme.text-primary;
+                        wrap: word-wrap; single-line: false;
+                        edited => { root.text-edited(self.text); }
+                    }
+                }
+
+                // Scrollbar track (only when content overflows)
+                if root2.max-scroll > 0px: track := Rectangle {
+                    x: parent.width - 10px; y: 2px;
+                    width: 6px; height: parent.height - 4px;
+                    background: Theme.bg-surface; border-radius: 3px;
+
+                    property <length> thumb-h: max(24px, self.height * (root2.view-h / root2.content-h));
+
+                    thumb := Rectangle {
+                        width: parent.width;
+                        height: track.thumb-h;
+                        y: (track.height - track.thumb-h) * (root2.scroll-y / root2.max-scroll);
+                        background: track-ta.pressed ? Theme.accent : Theme.text-muted;
+                        border-radius: 3px;
+                    }
+
+                    track-ta := TouchArea {
+                        width: parent.width; height: parent.height;
+                        moved => {
+                            root2.scroll-y = clamp(
+                                (self.mouse-y - track.thumb-h / 2) / (track.height - track.thumb-h) * root2.max-scroll,
+                                0px, root2.max-scroll);
+                        }
+                        clicked => {
+                            root2.scroll-y = clamp(
+                                (self.mouse-y - track.thumb-h / 2) / (track.height - track.thumb-h) * root2.max-scroll,
+                                0px, root2.max-scroll);
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px; alignment: end;
+                Text {
+                    text: root.word-count + " / " + root.word-limit + " words";
+                    font-size: Theme.ui-font-size - 3px;
+                    color: root.word-count > root.word-limit ? Theme.danger-text : Theme.text-muted;
+                    vertical-alignment: center; horizontal-stretch: 1;
+                }
+                cancel-t := TouchArea {
+                    width: 76px; height: 30px; clicked => { root.close(); }
+                    Rectangle {
+                        border-radius: 6px;
+                        background: cancel-t.has-hover ? Theme.bg-elevated : Theme.bg-surface;
+                        border-width: 1px; border-color: Theme.border;
+                        Text { text: "Cancel"; font-size: Theme.ui-font-size - 2px; color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+                ok-t := TouchArea {
+                    width: 76px; height: 30px; clicked => { root.accepted(root.value); }
+                    Rectangle {
+                        border-radius: 6px;
+                        background: ok-t.has-hover ? Theme.accent : Theme.accent-dim;
+                        Text { text: "Save"; font-size: Theme.ui-font-size - 2px; font-weight: 600; color: #fff; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        // Resize handle (bottom-right corner)
+        resize-ta := TouchArea {
+            x: parent.width - 20px; y: parent.height - 20px;
+            width: 20px; height: 20px;
+            mouse-cursor: nwse-resize;
+            property <length> start-w;
+            property <length> start-h;
+            pointer-event(e) => {
+                if (e.kind == PointerEventKind.down) {
+                    self.start-w = root.mw; self.start-h = root.mh;
+                }
+            }
+            moved => {
+                root.mw = clamp(self.start-w + (self.mouse-x - self.pressed-x) * 2, 320px, 900px);
+                root.mh = clamp(self.start-h + (self.mouse-y - self.pressed-y) * 2, 240px, 700px);
+            }
+            Rectangle {
+                width: 100%; height: 100%;
+                Path {
+                    commands: "M 18 6 L 6 18 M 18 11 L 11 18 M 18 16 L 16 18";
+                    stroke: Theme.text-muted; stroke-width: 1.5px;
+                }
+            }
+        }
+    }
+}
+
+// ─── Sort Bar (label + toggle; the menu is rendered as a top-level overlay) ──
+// Mode 0 = Date added. 1=Name A-Z, 2=Name Z-A, 3=count-asc/date-old, 4=count-desc/date-new.
+
+component SortBar {
+    in property <int> mode;
+    in property <bool> is-collection;
+    in property <bool> open;
+    callback toggle();
+
+    property <string> lbl0: "Date added";
+    property <string> lbl1: "Name A–Z";
+    property <string> lbl2: "Name Z–A";
+    property <string> lbl3: root.is-collection ? "Fewest items" : "Oldest first";
+    property <string> lbl4: root.is-collection ? "Most items"   : "Newest first";
+
+    property <string> current:
+          root.mode == 1 ? root.lbl1
+        : root.mode == 2 ? root.lbl2
+        : root.mode == 3 ? root.lbl3
+        : root.mode == 4 ? root.lbl4
+        : root.lbl0;
+
+    height: 26px;
+    bar := TouchArea {
+        clicked => { root.toggle(); }
+        Rectangle {
+            border-radius: 6px;
+            background: (root.open || bar.has-hover) ? Theme.bg-surface : transparent;
+            HorizontalLayout {
+                padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: start;
+                Text { text: "Sort:"; font-size: Theme.ui-font-size - 3px; color: Theme.text-muted; vertical-alignment: center; }
+                Text {
+                    text: root.current;
+                    font-size: Theme.ui-font-size - 3px; font-weight: 600;
+                    color: root.mode == 0 ? Theme.text-secondary : Theme.accent;
+                    vertical-alignment: center; horizontal-stretch: 1;
+                }
+                Text { text: root.open ? "▲" : "▼"; font-size: Theme.ui-font-size - 5px; color: Theme.text-muted; vertical-alignment: center; }
+            }
+        }
+    }
+}
+
+// Standalone menu list used as an overlay (renders above panels)
+component SortMenu inherits Rectangle {
+    in property <int> mode;
+    in property <bool> is-collection;
+    callback pick(int);
+    property <string> lbl3: root.is-collection ? "Fewest items" : "Oldest first";
+    property <string> lbl4: root.is-collection ? "Most items"   : "Newest first";
+    width: 170px; height: 5 * 28px + 8px;
+    border-radius: 8px;
+    background: Theme.bg-elevated;
+    border-width: 1px; border-color: Theme.border;
+    drop-shadow-blur: 16px; drop-shadow-color: #00000066;
+    VerticalLayout {
+        padding: 4px; spacing: 0px;
+        for opt[idx] in ["Date added", "Name A–Z", "Name Z–A", root.lbl3, root.lbl4]: o-t := TouchArea {
+            height: 28px;
+            clicked => { root.pick(idx); }
+            Rectangle {
+                border-radius: 5px;
+                background: idx == root.mode ? Theme.accent-dim : (o-t.has-hover ? Theme.bg-surface : transparent);
+                Text {
+                    text: opt;
+                    font-size: Theme.ui-font-size - 3px;
+                    color: idx == root.mode ? Theme.accent-text : Theme.text-primary;
+                    x: 10px; vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 // ─── Root Window ──────────────────────────────────────────────────────────────
 
 export component AppWindow inherits Window {
@@ -995,12 +1290,23 @@ export component AppWindow inherits Window {
     in-out property <int>    selected-item: -1;
     in-out property <string> search-text: "";
     in-out property <string> coll-search-text: "";
+    in-out property <int>    coll-sort-mode: 0;
+    in-out property <int>    item-sort-mode: 0;
+    in-out property <bool>   coll-sort-open: false;
+    in-out property <bool>   item-sort-open: false;
 
     // Detail panel
     in-out property <string> detail-name: "";
     in-out property <string> detail-desc: "";
+    in-out property <string> detail-year: "";
+    in-out property <string> detail-month: "";
+    in-out property <string> detail-day: "";
     in-out property <bool>   detail-has-photo: false;
     in-out property <image>  detail-photo;
+    in-out property <[PhotoData]> detail-photos: [];
+    in-out property <int>    lightbox-index: 0;
+    in-out property <image>  lightbox-photo;
+    in-out property <int>    lightbox-count: 0;
 
     // UI state
     in-out property <bool>   is-editing: false;
@@ -1027,6 +1333,13 @@ export component AppWindow inherits Window {
     in-out property <string> name-input-purpose: "";  // "rename-coll" | "rename-item" | "save-template"
     in-out property <int>    name-input-target: -1;
 
+    // Large multiline field editor modal
+    in-out property <bool>   show-field-editor: false;
+    in-out property <string> field-editor-title: "";
+    in-out property <string> field-editor-value: "";
+    in-out property <string> field-editor-purpose: "";  // "desc" | field id
+    in-out property <int>    field-editor-wordcount: 0;
+
     // Callbacks
     callback select-collection(int, bool, bool);  // idx, ctrl, shift
     callback select-item(int, bool, bool);
@@ -1042,6 +1355,10 @@ export component AppWindow inherits Window {
     callback duplicate-selected-collections();
     callback toggle-edit();
     callback pick-photo();
+    callback remove-photo(int);
+    callback set-main-photo(int);
+    callback lightbox-load(int);  // load full-res photo at index into lightbox-photo
+    callback count-words(string);  // count words in field editor, updates field-editor-wordcount
     callback field-changed(string, string);
     callback resize-left(length);
     callback resize-mid(length);
@@ -1053,6 +1370,8 @@ export component AppWindow inherits Window {
     callback open-data-folder();
     callback search-changed(string);
     callback search-collections(string);
+    callback set-coll-sort(int);
+    callback set-item-sort(int);
     callback collection-icon-clicked(int);
     callback icon-picked(string);
     callback add-custom-field();
@@ -1153,6 +1472,12 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                Rectangle { height: 4px; }
+                SortBar {
+                    mode: root.coll-sort-mode; is-collection: true; open: root.coll-sort-open;
+                    toggle => { root.item-sort-open = false; root.coll-sort-open = !root.coll-sort-open; }
+                }
+
                 // Collection list
                 ScrollView {
                     vertical-stretch: 1;
@@ -1165,7 +1490,7 @@ export component AppWindow inherits Window {
                             multi-select-mode: root.coll-multi-mode;
                             checked: root.coll-checked.length > i && root.coll-checked[i].checked;
                             row-visible: coll.row-match;
-                            clicked(ctrl, shift) => { root.select-collection(i, ctrl, shift); fs.focus(); }
+                            clicked(ctrl, shift) => { root.coll-sort-open = false; root.item-sort-open = false; root.select-collection(i, ctrl, shift); fs.focus(); }
                             double-clicked => {
                                 root.name-input-title = "Rename collection";
                                 root.name-input-value = coll.name;
@@ -1204,7 +1529,7 @@ export component AppWindow inherits Window {
                     spacing: 4px;
 
                     ms-t := TouchArea {
-                        height: 28px; clicked => {
+                        height: 36px; clicked => {
                             root.clear-selection();
                             fs.focus();
                         }
@@ -1213,11 +1538,24 @@ export component AppWindow inherits Window {
                             background: (root.coll-multi-mode || root.item-multi-mode) ? Theme.accent-dim : (ms-t.has-hover ? Theme.bg-elevated : transparent);
                             border-width: (root.coll-multi-mode || root.item-multi-mode) ? 1px : 0px;
                             border-color: Theme.border-accent;
-                            Text {
-                                text: (root.coll-multi-mode || root.item-multi-mode) ? "Clear selection (Esc)" : "Ctrl/Shift-click to multi-select";
+                            if (root.coll-multi-mode || root.item-multi-mode): Text {
+                                text: "Clear selection (Esc)";
                                 font-size: Theme.ui-font-size - 4px;
-                                color: (root.coll-multi-mode || root.item-multi-mode) ? Theme.accent-text : Theme.text-muted;
+                                color: Theme.accent-text;
                                 vertical-alignment: center; horizontal-alignment: center;
+                            }
+                            if !(root.coll-multi-mode || root.item-multi-mode): VerticalLayout {
+                                alignment: center; spacing: 2px;
+                                Text {
+                                    text: "Ctrl/Shift-click to multi-select";
+                                    font-size: Theme.ui-font-size - 4px; color: Theme.text-muted;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Right-click for options";
+                                    font-size: Theme.ui-font-size - 4px; color: Theme.text-muted;
+                                    horizontal-alignment: center;
+                                }
                             }
                         }
                     }
@@ -1316,6 +1654,12 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if root.selected-collection >= 0: Rectangle { height: 4px; }
+                if root.selected-collection >= 0: SortBar {
+                    mode: root.item-sort-mode; is-collection: false; open: root.item-sort-open;
+                    toggle => { root.coll-sort-open = false; root.item-sort-open = !root.item-sort-open; }
+                }
+
                 // No collection selected
                 if root.selected-collection < 0: Rectangle {
                     vertical-stretch: 1;
@@ -1377,8 +1721,10 @@ export component AppWindow inherits Window {
                 Text { text: "Select an item to view details"; font-size: Theme.ui-font-size - 2px; color: Theme.text-muted; horizontal-alignment: center; }
             }
 
-            if root.selected-item >= 0: VerticalLayout {
-                padding: 22px; spacing: 0px;
+            if root.selected-item >= 0: ScrollView {
+                VerticalLayout {
+                    padding: 22px; spacing: 0px;
+                    alignment: start;
 
                 // Top bar
                 HorizontalLayout {
@@ -1391,31 +1737,51 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 5px; alignment: center;
                         save-t := TouchArea {
-                            width: 76px; height: 34px;
+                            width: 84px; height: 34px;
                             clicked => { root.toggle-edit(); }
-                            Text {
-                                text: root.is-editing ? "💾 Save" : "✏ Edit";
-                                font-family: "Segoe UI Emoji";
-                                font-size: Theme.ui-font-size - 1px; font-weight: 600;
-                                color: root.is-editing ? Theme.accent-text
-                                     : (save-t.has-hover ? Theme.text-primary : Theme.text-secondary);
-                                width: parent.width; height: parent.height;
-                                horizontal-alignment: center; vertical-alignment: center;
+                            HorizontalLayout {
+                                alignment: center; spacing: 4px;
+                                Text {
+                                    text: root.is-editing ? "💾" : "✏";
+                                    font-family: "Segoe UI Emoji";
+                                    font-size: Theme.ui-font-size - 2px;
+                                    height: 34px; vertical-alignment: center;
+                                }
+                                Text {
+                                    text: root.is-editing ? "Save" : "Edit";
+                                    font-size: Theme.ui-font-size - 1px; font-weight: 600;
+                                    color: root.is-editing ? Theme.accent-text
+                                         : (save-t.has-hover ? Theme.text-primary : Theme.text-secondary);
+                                    height: 34px; vertical-alignment: center;
+                                }
                             }
                         }
                         del-item-t := TouchArea {
-                            width: 34px; height: 34px;
+                            width: 92px; height: 34px;
                             clicked => { root.delete-item(root.selected-item); }
                             Rectangle {
                                 border-radius: 6px;
                                 background: del-item-t.has-hover ? Theme.danger-bg : transparent;
-                                Text { text: "×"; font-size: Theme.ui-font-size; color: Theme.danger-text; horizontal-alignment: center; vertical-alignment: center; }
+                                HorizontalLayout {
+                                    alignment: center; spacing: 4px;
+                                    Text {
+                                        text: "🗑"; font-family: "Segoe UI Emoji";
+                                        font-size: Theme.ui-font-size - 2px;
+                                        height: 34px; vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: "Delete";
+                                        font-size: Theme.ui-font-size - 1px; font-weight: 600;
+                                        color: Theme.danger-text;
+                                        height: 34px; vertical-alignment: center;
+                                    }
+                                }
                             }
                         }
                     }
                 }
 
-                Rectangle { height: 14px; }
+                Rectangle { height: 4px; }
 
                 // Photo + name/desc
                 HorizontalLayout {
@@ -1445,7 +1811,7 @@ export component AppWindow inherits Window {
                                 border-radius: 11px; background: #00000055;
                                 visible: edit-photo-t.has-hover;
                                 Text {
-                                    text: "Change"; font-size: Theme.ui-font-size - 3px;
+                                    text: "Add"; font-size: Theme.ui-font-size - 3px;
                                     color: #fff; font-weight: 600;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
@@ -1454,7 +1820,12 @@ export component AppWindow inherits Window {
 
                         // View mode — click to open lightbox
                         if !root.is-editing && root.detail-has-photo: view-photo-t := TouchArea {
-                            clicked => { root.show-lightbox = true; }
+                            clicked => {
+                                root.lightbox-index = 0;
+                                root.lightbox-count = root.detail-photos.length;
+                                root.lightbox-load(0);
+                                root.show-lightbox = true;
+                            }
                             Rectangle {
                                 border-radius: 11px; background: #00000040;
                                 visible: view-photo-t.has-hover;
@@ -1483,7 +1854,9 @@ export component AppWindow inherits Window {
                                 if root.is-editing: TextInput {
                                     text <=> root.detail-name;
                                     font-size: Theme.ui-font-size + 1px; font-weight: 600;
-                                    color: Theme.text-primary; x: 10px; y: 8px; width: parent.width - 20px;
+                                    color: Theme.text-primary;
+                                    x: 10px; width: parent.width - 20px; height: parent.height;
+                                    vertical-alignment: center;
                                     edited => { root.field-changed("name", self.text); }
                                 }
                                 if !root.is-editing: Text {
@@ -1495,28 +1868,187 @@ export component AppWindow inherits Window {
 
                         VerticalLayout {
                             spacing: 3px;
-                            SectionLabel { text: "DESCRIPTION"; }
                             Rectangle {
-                                height: 58px; border-radius: 6px;
-                                background: root.is-editing ? Theme.bg-input : transparent;
+                                height: 22px;
+                                SectionLabel { text: "DESCRIPTION"; width: parent.width; }
+                                edit-desc-t := TouchArea {
+                                    x: parent.width - 56px; y: 2px;
+                                    width: 56px; height: 18px;
+                                    clicked => {
+                                        root.field-editor-title = "Description";
+                                        root.field-editor-value = root.detail-desc;
+                                        root.field-editor-purpose = "desc";
+                                        root.show-field-editor = true;
+                                    }
+                                    Rectangle {
+                                        border-radius: 4px;
+                                        background: edit-desc-t.has-hover ? Theme.bg-elevated : transparent;
+                                        Text { text: "Enlarge"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 72px; border-radius: 6px;
+                                background: Theme.bg-input;
                                 border-width: root.is-editing ? 1px : 0px;
                                 border-color: Theme.accent-dim;
+                                clip: true;
                                 animate background { duration: 130ms; }
-                                if root.is-editing: TextInput {
-                                    text <=> root.detail-desc;
-                                    font-size: Theme.ui-font-size; color: Theme.text-secondary;
-                                    x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
-                                    wrap: word-wrap;
-                                    edited => { root.field-changed("desc", self.text); }
+                                desc-focus-ta := TouchArea {
+                                    width: parent.width; height: parent.height;
+                                    enabled: root.is-editing;
+                                    mouse-cursor: text;
+                                    clicked => { desc-input.focus(); }
                                 }
-                                if !root.is-editing: Text {
-                                    text: root.detail-desc == "" ? "No description" : root.detail-desc;
+                                desc-input := TextInput {
+                                    text <=> root.detail-desc;
                                     font-size: Theme.ui-font-size;
-                                    color: root.detail-desc == "" ? Theme.text-muted : Theme.text-secondary;
-                                    wrap: word-wrap; x: 2px; width: parent.width - 4px;
+                                    color: Theme.text-primary;
+                                    x: 8px; y: 6px; width: parent.width - 14px; height: parent.height - 12px;
+                                    wrap: word-wrap; single-line: false;
+                                    read-only: !root.is-editing;
+                                }
+                                if !root.is-editing && root.detail-desc == "": Text {
+                                    text: "No description";
+                                    font-size: Theme.ui-font-size; color: Theme.text-muted;
+                                    x: 12px; y: 8px;
                                 }
                             }
                         }
+                    }
+                }
+
+                // Photo strip — all photos; click=set main (or right-click), ×=remove in edit mode
+                if root.detail-photos.length > 1 || (root.is-editing && root.detail-photos.length >= 1): VerticalLayout {
+                    spacing: 3px;
+                    Rectangle { height: 24px; }
+                    SectionLabel { text: "PHOTOS"; }
+                    Rectangle {
+                        height: 58px;
+                        clip: true;
+                        Flickable {
+                            width: 100%; height: 58px;
+                            viewport-width: root.detail-photos.length * 62px;
+                            viewport-height: 56px;
+                        for ph[i] in root.detail-photos: Rectangle {
+                            x: i * 62px; y: 0;
+                            width: 56px; height: 56px; border-radius: 8px;
+                            background: Theme.bg-surface;
+                            border-width: ph.is-main ? 2px : 1px;
+                            border-color: ph.is-main ? Theme.accent : Theme.border;
+                            clip: true;
+
+                            strip-t := TouchArea {
+                                clicked => {
+                                    if root.is-editing {
+                                        root.set-main-photo(ph.index);
+                                    } else {
+                                        root.lightbox-index = ph.index;
+                                        root.lightbox-count = root.detail-photos.length;
+                                        root.lightbox-load(ph.index);
+                                        root.show-lightbox = true;
+                                    }
+                                }
+                                Image {
+                                    source: ph.thumbnail;
+                                    width: 100%; height: 100%; image-fit: cover;
+                                }
+                            }
+
+                            if ph.is-main: Rectangle {
+                                x: 0; y: 0; width: 100%; height: 15px;
+                                background: Theme.accent;
+                                Text {
+                                    text: "main"; font-size: 9px; color: #fff; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
+                                }
+                            }
+
+                            if root.is-editing: rm-ph-t := TouchArea {
+                                x: parent.width - 18px; y: 2px; width: 16px; height: 16px;
+                                clicked => { root.remove-photo(ph.index); }
+                                Rectangle {
+                                    border-radius: 8px; background: #cc3333;
+                                    Text { text: "×"; font-size: 12px; color: #fff; font-weight: 700;
+                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                    }
+                    if root.is-editing: Text {
+                        text: "Click to set as main · × to remove";
+                        font-size: Theme.ui-font-size - 5px; color: Theme.text-muted;
+                    }
+                    if !root.is-editing: Text {
+                        text: "Click a photo to enlarge. Drag to scroll.";
+                        font-size: Theme.ui-font-size - 5px; color: Theme.text-muted;
+                    }
+                }
+
+                Rectangle { height: 12px; }
+                VerticalLayout {
+                    spacing: 3px;
+                    SectionLabel { text: "DATE ACQUIRED"; }
+                    if root.is-editing: HorizontalLayout {
+                        spacing: 6px; height: 34px; alignment: start;
+                        // Year
+                        Rectangle {
+                            width: 70px; border-radius: 6px;
+                            background: Theme.bg-input; border-width: 1px; border-color: Theme.accent-dim;
+                            if root.detail-year == "": Text { text: "YYYY"; font-size: Theme.ui-font-size - 2px; color: Theme.text-muted; x: 8px; vertical-alignment: center; }
+                            TextInput {
+                                text <=> root.detail-year;
+                                font-size: Theme.ui-font-size - 1px; color: Theme.text-primary;
+                                x: 8px; width: parent.width - 16px; height: parent.height; vertical-alignment: center;
+                                input-type: number;
+                                edited => {
+                                    if self.text.character-count > 4 { self.text = root.detail-year; }
+                                }
+                            }
+                        }
+                        Text { text: "-"; color: Theme.text-muted; vertical-alignment: center; }
+                        // Month
+                        Rectangle {
+                            width: 48px; border-radius: 6px;
+                            background: Theme.bg-input; border-width: 1px; border-color: Theme.accent-dim;
+                            if root.detail-month == "": Text { text: "MM"; font-size: Theme.ui-font-size - 2px; color: Theme.text-muted; x: 8px; vertical-alignment: center; }
+                            TextInput {
+                                text <=> root.detail-month;
+                                font-size: Theme.ui-font-size - 1px; color: Theme.text-primary;
+                                x: 8px; width: parent.width - 16px; height: parent.height; vertical-alignment: center;
+                                input-type: number;
+                                edited => {
+                                    if self.text.character-count > 2 { self.text = root.detail-month; }
+                                }
+                            }
+                        }
+                        Text { text: "-"; color: Theme.text-muted; vertical-alignment: center; }
+                        // Day
+                        Rectangle {
+                            width: 48px; border-radius: 6px;
+                            background: Theme.bg-input; border-width: 1px; border-color: Theme.accent-dim;
+                            if root.detail-day == "": Text { text: "DD"; font-size: Theme.ui-font-size - 2px; color: Theme.text-muted; x: 8px; vertical-alignment: center; }
+                            TextInput {
+                                text <=> root.detail-day;
+                                font-size: Theme.ui-font-size - 1px; color: Theme.text-primary;
+                                x: 8px; width: parent.width - 16px; height: parent.height; vertical-alignment: center;
+                                input-type: number;
+                                edited => {
+                                    if self.text.character-count > 2 { self.text = root.detail-day; }
+                                }
+                            }
+                        }
+                    }
+                    if !root.is-editing: Text {
+                        text: (root.detail-year == "")
+                            ? "—"
+                            : (root.detail-year
+                               + (root.detail-month == "" ? "" : "-" + root.detail-month)
+                               + (root.detail-day == "" ? "" : "-" + root.detail-day));
+                        font-size: Theme.ui-font-size;
+                        color: root.detail-year == "" ? Theme.text-muted : Theme.text-primary;
+                        vertical-alignment: center; height: 28px;
                     }
                 }
 
@@ -1524,81 +2056,96 @@ export component AppWindow inherits Window {
                 Rectangle { height: 1px; background: Theme.border; }
                 Rectangle { height: 12px; }
 
-                // Details header row
-                HorizontalLayout {
-                    alignment: space-between; height: 26px;
-                    SectionLabel { text: "DETAILS"; }
-                    if root.is-editing: HorizontalLayout {
-                        spacing: 4px; alignment: center;
-                        load-tmpl-t := TouchArea {
-                            width: 100px; height: 22px;
-                            clicked => { root.show-template-picker = true; }
-                            Rectangle {
-                                border-radius: 5px;
-                                background: load-tmpl-t.has-hover ? Theme.bg-elevated : Theme.bg-surface;
-                                border-width: 1px; border-color: Theme.border;
-                                Text { text: "Load template"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                // Details header (label always centered on its own row)
+                SectionLabel { text: "DETAILS"; }
+
+                // Template / add-field buttons on their own row (edit mode only)
+                if root.is-editing: HorizontalLayout {
+                    height: 26px; spacing: 4px; alignment: center;
+                    load-tmpl-t := TouchArea {
+                        width: 100px; height: 22px;
+                        clicked => { root.show-template-picker = true; }
+                        Rectangle {
+                            border-radius: 5px;
+                            background: load-tmpl-t.has-hover ? Theme.bg-elevated : Theme.bg-surface;
+                            border-width: 1px; border-color: Theme.border;
+                            Text { text: "Load template"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
                         }
-                        save-tmpl-t := TouchArea {
-                            width: 108px; height: 22px;
-                            clicked => {
-                                root.name-input-title = "Save as template";
-                                root.name-input-value = "";
-                                root.name-input-purpose = "save-template";
-                                root.show-name-input = true;
-                            }
-                            Rectangle {
-                                border-radius: 5px;
-                                background: save-tmpl-t.has-hover ? Theme.accent-dim : Theme.bg-surface;
-                                border-width: 1px; border-color: Theme.border;
-                                Text { text: "Save as template"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                    }
+                    save-tmpl-t := TouchArea {
+                        width: 108px; height: 22px;
+                        clicked => {
+                            root.name-input-title = "Save as template";
+                            root.name-input-value = "";
+                            root.name-input-purpose = "save-template";
+                            root.show-name-input = true;
                         }
-                        add-field-t := TouchArea {
-                            width: 60px; height: 22px;
-                            clicked => { root.add-custom-field(); }
-                            Rectangle {
-                                border-radius: 5px;
-                                background: add-field-t.has-hover ? Theme.bg-elevated : Theme.bg-surface;
-                                border-width: 1px; border-color: Theme.border;
-                                Text { text: "+ Field"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
-                            }
+                        Rectangle {
+                            border-radius: 5px;
+                            background: save-tmpl-t.has-hover ? Theme.accent-dim : Theme.bg-surface;
+                            border-width: 1px; border-color: Theme.border;
+                            Text { text: "Save as template"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.accent-text; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                    add-field-t := TouchArea {
+                        width: 60px; height: 22px;
+                        clicked => { root.add-custom-field(); }
+                        Rectangle {
+                            border-radius: 5px;
+                            background: add-field-t.has-hover ? Theme.bg-elevated : Theme.bg-surface;
+                            border-width: 1px; border-color: Theme.border;
+                            Text { text: "+ Field"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
                         }
                     }
                 }
 
                 Rectangle { height: 8px; }
 
-                // Scrollable fields
-                ScrollView {
-                    vertical-stretch: 1;
-                    VerticalLayout {
-                        spacing: 10px; padding-right: 16px;
+                // Custom fields (the whole panel scrolls via the outer ScrollView)
+                VerticalLayout {
+                    spacing: 10px; padding-right: 16px;
 
                         for f in root.detail-fields: VerticalLayout {
                             spacing: 3px;
 
-                            // Field label row
-                            HorizontalLayout {
-                                height: 22px; spacing: 4px; alignment: space-between;
-
+                            // Field label row — absolute positions so Edit/× don't drift
+                            Rectangle {
+                                height: 22px;
                                 if root.is-editing: TextInput {
-                                    // Label is sent to Rust on every edit (but Rust only saves on flush)
                                     text: f.label;
                                     font-size: max(9px, Theme.ui-font-size - 4px);
                                     letter-spacing: 1.5px; font-weight: 600;
                                     color: Theme.text-muted;
-                                    horizontal-stretch: 1; vertical-alignment: center;
+                                    x: 0; width: parent.width - 90px; height: parent.height;
+                                    vertical-alignment: center;
                                     edited => { root.custom-field-label-changed(f.id, self.text); }
                                 }
                                 if !root.is-editing: Text {
                                     text: f.label;
                                     font-size: max(9px, Theme.ui-font-size - 4px);
                                     letter-spacing: 1.5px; font-weight: 600; color: Theme.text-muted;
-                                    horizontal-stretch: 1; vertical-alignment: center;
+                                    x: 0; width: parent.width - 64px; height: parent.height;
+                                    vertical-alignment: center;
                                 }
+                                // Edit button — fixed at right, leaving room for × in edit mode
+                                edit-f-t := TouchArea {
+                                    x: parent.width - (root.is-editing ? 82px : 56px); y: 0;
+                                    width: 56px; height: 22px;
+                                    clicked => {
+                                        root.field-editor-title = f.label;
+                                        root.field-editor-value = f.value;
+                                        root.field-editor-purpose = f.id;
+                                        root.show-field-editor = true;
+                                    }
+                                    Rectangle {
+                                        border-radius: 4px;
+                                        background: edit-f-t.has-hover ? Theme.bg-elevated : transparent;
+                                        Text { text: "Enlarge"; font-size: max(9px, Theme.ui-font-size - 4px); color: Theme.text-secondary; horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                                // Delete × — fixed at far right, edit mode only
                                 if root.is-editing: del-f-t := TouchArea {
+                                    x: parent.width - 22px; y: 0;
                                     width: 22px; height: 22px;
                                     clicked => { root.delete-custom-field(f.id); }
                                     Rectangle {
@@ -1609,33 +2156,37 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // Field value
+                            // Field value — themed multiline box, selectable in view mode
                             Rectangle {
-                                height: f.label == "NOTES" ? 100px : 36px;
+                                height: f.label == "NOTES" ? 92px : 52px;
                                 border-radius: 6px;
-                                background: root.is-editing ? Theme.bg-input : Theme.bg-surface;
-                                border-width: 1px;
-                                border-color: root.is-editing ? Theme.accent-dim : Theme.border;
+                                background: Theme.bg-input;
+                                border-width: root.is-editing ? 1px : 0px;
+                                border-color: Theme.accent-dim;
+                                clip: true;
                                 animate background { duration: 130ms; }
-                                if root.is-editing: TextInput {
-                                    text: f.value; font-size: Theme.ui-font-size; color: Theme.text-primary;
-                                    x: 10px; y: 8px; height: parent.height - 16px; horizontal-stretch: 1;
-                                    wrap: f.label == "NOTES" ? word-wrap : no-wrap;
-                                    edited => { root.custom-field-value-changed(f.id, self.text); }
+                                cf-focus-ta := TouchArea {
+                                    width: parent.width; height: parent.height;
+                                    enabled: root.is-editing;
+                                    mouse-cursor: text;
+                                    clicked => { cf-input.focus(); }
                                 }
-                                if !root.is-editing: Text {
-                                    text: f.value == "" ? "-" : f.value; font-size: Theme.ui-font-size;
-                                    color: f.value == "" ? Theme.text-muted : Theme.text-primary;
-                                    vertical-alignment: center; x: 10px; width: parent.width - 20px;
-                                    wrap: f.label == "NOTES" ? word-wrap : no-wrap;
+                                cf-input := TextInput {
+                                    text: f.value;
+                                    font-size: Theme.ui-font-size;
+                                    color: f.value == "" && !root.is-editing ? Theme.text-muted : Theme.text-primary;
+                                    x: 8px; y: 6px; width: parent.width - 14px; height: parent.height - 12px;
+                                    wrap: word-wrap; single-line: false;
+                                    read-only: !root.is-editing;
+                                    edited => { root.custom-field-value-changed(f.id, self.text); }
                                 }
                             }
                         }
 
                         Rectangle { height: 20px; }
                     }
-                }
 
+                }
             }
         }
     }
@@ -1671,8 +2222,40 @@ export component AppWindow inherits Window {
 
     if root.show-lightbox: PhotoLightbox {
         width: root.width; height: root.height;
-        photo: root.detail-photo;
+        photo: root.lightbox-photo;
+        index: root.lightbox-index;
+        count: root.lightbox-count;
         close => { root.show-lightbox = false; fs.focus(); }
+        prev => {
+            root.lightbox-index = root.lightbox-index <= 0 ? root.lightbox-count - 1 : root.lightbox-index - 1;
+            root.lightbox-load(root.lightbox-index);
+        }
+        next => {
+            root.lightbox-index = root.lightbox-index >= root.lightbox-count - 1 ? 0 : root.lightbox-index + 1;
+            root.lightbox-load(root.lightbox-index);
+        }
+    }
+
+    // Sort menu overlays (render above panels). Positioned under their bars.
+    if root.coll-sort-open: TouchArea {
+        width: root.width; height: root.height;
+        clicked => { root.coll-sort-open = false; }
+        SortMenu {
+            x: 16px; y: 132px;
+            width: root.left-width - 32px;
+            mode: root.coll-sort-mode; is-collection: true;
+            pick(m) => { root.coll-sort-mode = m; root.set-coll-sort(m); root.coll-sort-open = false; }
+        }
+    }
+    if root.item-sort-open: TouchArea {
+        width: root.width; height: root.height;
+        clicked => { root.item-sort-open = false; }
+        SortMenu {
+            x: root.left-width + 16px; y: 134px;
+            width: root.mid-width - 32px;
+            mode: root.item-sort-mode; is-collection: false;
+            pick(m) => { root.item-sort-mode = m; root.set-item-sort(m); root.item-sort-open = false; }
+        }
     }
 
     // Context menu — collection
@@ -1745,6 +2328,27 @@ export component AppWindow inherits Window {
                 root.rename-item(root.name-input-target, txt);
             } else if root.name-input-purpose == "save-template" {
                 root.save-template-named(txt);
+            }
+            fs.focus();
+        }
+    }
+
+    if root.show-field-editor: FieldEditorModal {
+        width: root.width; height: root.height;
+        title: root.field-editor-title;
+        value <=> root.field-editor-value;
+        word-count: root.field-editor-wordcount;
+        word-limit: 200;
+        init => { root.count-words(root.field-editor-value); }
+        text-edited(txt) => { root.count-words(txt); }
+        close => { root.show-field-editor = false; fs.focus(); }
+        accepted(txt) => {
+            root.show-field-editor = false;
+            if root.field-editor-purpose == "desc" {
+                root.detail-desc = txt;
+                root.field-changed("desc", txt);
+            } else {
+                root.custom-field-value-changed(root.field-editor-purpose, txt);
             }
             fs.focus();
         }

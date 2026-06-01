@@ -25,9 +25,20 @@ struct Item {
     collection_id: String,
     name: String,
     short_desc: String,
-    thumbnail_path: Option<String>,
+    // All photos for this item; photos[0] is the primary (card thumbnail + main image).
+    #[serde(default)]
+    photos: Vec<String>,
+    // Date acquired in ISO "YYYY-MM-DD", or "" if unset. Used for date sorting.
+    #[serde(default)]
+    acquired_date: String,
     // All fields including defaults are stored as custom_fields
     custom_fields: Vec<CustomField>,
+}
+
+impl Item {
+    fn primary_photo(&self) -> Option<&str> {
+        self.photos.first().map(|s| s.as_str()).filter(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +67,6 @@ struct AppData {
 
 fn default_fields() -> Vec<CustomField> {
     vec![
-        CustomField { id: Uuid::new_v4().to_string(), label: "ACQUIRED".into(),    value: "".into() },
         CustomField { id: Uuid::new_v4().to_string(), label: "CONDITION".into(),   value: "".into() },
         CustomField { id: Uuid::new_v4().to_string(), label: "VALUE / PRICE".into(), value: "".into() },
         CustomField { id: Uuid::new_v4().to_string(), label: "TAGS".into(),        value: "".into() },
@@ -73,6 +83,11 @@ struct Settings {
     left_panel_width: f32,
     mid_panel_width: f32,
     font_size: f32,
+    // Sort modes: see sort comparators. 0=name A-Z,1=name Z-A,2=count/date asc,3=count/date desc
+    #[serde(default)]
+    coll_sort: i32,
+    #[serde(default)]
+    item_sort: i32,
 }
 
 impl Default for Settings {
@@ -83,6 +98,8 @@ impl Default for Settings {
             left_panel_width: 220.0,
             mid_panel_width: 268.0,
             font_size: 15.0,
+            coll_sort: 0,
+            item_sort: 0,
         }
     }
 }
@@ -164,22 +181,33 @@ fn photos_dir() -> PathBuf {
     let mut p = app_dir(); p.push("photos");
     std::fs::create_dir_all(&p).ok(); p
 }
+fn thumbs_dir() -> PathBuf {
+    let mut p = app_dir(); p.push("photos"); p.push("thumbnails");
+    std::fs::create_dir_all(&p).ok(); p
+}
 fn data_path()     -> PathBuf { let mut p = app_dir(); p.push("data.json");     p }
 fn settings_path() -> PathBuf { let mut p = app_dir(); p.push("settings.json"); p }
+
+// Copy an existing photo file to a new uniquely-named file in photos_dir.
+// Returns the new path string, or None if the source is missing/unreadable.
+fn copy_photo_file(src: &str) -> Option<String> {
+    if src.is_empty() { return None; }
+    let src_path = std::path::Path::new(src);
+    if !src_path.exists() { return None; }
+    let ext = src_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+    let dest = photos_dir().join(format!("{}.{}", Uuid::new_v4(), ext));
+    std::fs::copy(src_path, &dest).ok()?;
+    let dest_str = dest.to_string_lossy().to_string();
+    generate_thumbnail(&dest_str);
+    Some(dest_str)
+}
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
 fn load_data() -> AppData {
     std::fs::read_to_string(data_path()).ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| AppData {
-            collections: vec![
-                Collection { id: Uuid::new_v4().to_string(), name: "Headphones".into(),    icon: "🎧".into() },
-                Collection { id: Uuid::new_v4().to_string(), name: "Fountain Pens".into(), icon: "✒".into() },
-            ],
-            items: vec![],
-            templates: vec![],
-        })
+        .unwrap_or_default()
 }
 
 fn save_data(data: &AppData) {
@@ -206,6 +234,28 @@ fn to_slint_collections(data: &AppData) -> slint::ModelRc<CollectionData> {
     collections_model(data, "")
 }
 
+// Collections sort the UNDERLYING vector (not just display) so the stable-index
+// selection model stays correct. Call before building the model.
+fn sort_collections(data: &mut AppData, mode: i32) {
+    match mode {
+        1 => data.collections.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        2 => data.collections.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+        3 => {
+            let count = |id: &str| data.items.iter().filter(|i| i.collection_id == id).count();
+            let counts: std::collections::HashMap<String, usize> =
+                data.collections.iter().map(|c| (c.id.clone(), count(&c.id))).collect();
+            data.collections.sort_by(|a, b| counts[&a.id].cmp(&counts[&b.id]));
+        }
+        4 => {
+            let count = |id: &str| data.items.iter().filter(|i| i.collection_id == id).count();
+            let counts: std::collections::HashMap<String, usize> =
+                data.collections.iter().map(|c| (c.id.clone(), count(&c.id))).collect();
+            data.collections.sort_by(|a, b| counts[&b.id].cmp(&counts[&a.id]));
+        }
+        _ => {} // 0 = date added: leave in insertion order
+    }
+}
+
 fn collections_model(data: &AppData, search: &str) -> slint::ModelRc<CollectionData> {
     let s = search.to_lowercase();
     let v: Vec<CollectionData> = data.collections.iter().map(|c| {
@@ -220,6 +270,13 @@ fn collections_model(data: &AppData, search: &str) -> slint::ModelRc<CollectionD
     slint::ModelRc::new(slint::VecModel::from(v))
 }
 
+// Truncate text to at most `limit` words, cutting at the word boundary.
+fn truncate_words(text: &str, limit: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= limit { return text.to_string(); }
+    words[..limit].join(" ")
+}
+
 fn load_slint_image(path: &str) -> Option<slint::Image> {
     let img = image::open(path).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
@@ -227,9 +284,46 @@ fn load_slint_image(path: &str) -> Option<slint::Image> {
     Some(slint::Image::from_rgba8(buf))
 }
 
+// The cached-thumbnail path for an original photo: "<thumbs_dir>/<filename>.jpg"
+fn thumb_path_for(original: &str) -> PathBuf {
+    let p = std::path::Path::new(original);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("thumb");
+    thumbs_dir().join(format!("{}.jpg", stem))
+}
+
+// Generate (or regenerate) a cached thumbnail for an original photo.
+// 400px so it stays crisp on the card grid and the ~100px detail image.
+fn generate_thumbnail(original: &str) {
+    if original.is_empty() { return; }
+    if let Ok(img) = image::open(original) {
+        let thumb = img.resize(400, 400, image::imageops::FilterType::Lanczos3);
+        let dest = thumb_path_for(original);
+        thumb.to_rgb8().save_with_format(&dest, image::ImageFormat::Jpeg).ok();
+    }
+}
+
+// Delete an original photo AND its cached thumbnail.
+fn delete_photo_files(original: &str) {
+    if original.is_empty() { return; }
+    std::fs::remove_file(original).ok();
+    std::fs::remove_file(thumb_path_for(original)).ok();
+}
+
 fn thumbnail_image(path: &str) -> slint::Image {
+    if path.is_empty() { return slint::Image::default(); }
+    // Prefer the cached thumbnail; generate it if missing, then load it.
+    let thumb = thumb_path_for(path);
+    if !thumb.exists() {
+        generate_thumbnail(path);
+    }
+    if let Some(t) = thumb.to_str() {
+        if let Some(img) = load_slint_image(t) {
+            return img;
+        }
+    }
+    // Fallback: decode original directly (e.g. thumb generation failed)
     if let Ok(img) = image::open(path) {
-        let thumb = img.thumbnail(200, 200).into_rgba8();
+        let thumb = img.resize(400, 400, image::imageops::FilterType::Lanczos3).into_rgba8();
         let (w, h) = thumb.dimensions();
         let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(thumb.as_raw(), w, h);
         return slint::Image::from_rgba8(buf);
@@ -237,32 +331,59 @@ fn thumbnail_image(path: &str) -> slint::Image {
     slint::Image::default()
 }
 
+// ─── Sorting ──────────────────────────────────────────────────────────────────
+// Item sort modes: 0=name A-Z, 1=name Z-A, 2=date oldest, 3=date newest
+// Coll sort modes: 0=name A-Z, 1=name Z-A, 2=count low-high, 3=count high-low
+//
+// Sort modes live in thread-locals so the many model-building call sites don't
+// each need a sort argument threaded through them.
+thread_local! {
+    static ITEM_SORT: std::cell::Cell<i32> = std::cell::Cell::new(0);
+    static COLL_SORT: std::cell::Cell<i32> = std::cell::Cell::new(0);
+}
+fn set_item_sort(m: i32) { ITEM_SORT.with(|c| c.set(m)); }
+fn get_item_sort() -> i32 { ITEM_SORT.with(|c| c.get()) }
+fn set_coll_sort(m: i32) { COLL_SORT.with(|c| c.set(m)); }
+#[allow(dead_code)]
+fn get_coll_sort() -> i32 { COLL_SORT.with(|c| c.get()) }
+
+fn sort_items(items: &mut Vec<&Item>, mode: i32) {
+    match mode {
+        1 => items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        2 => items.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+        3 => items.sort_by(|a, b| cmp_dates(&a.acquired_date, &b.acquired_date, true)),
+        4 => items.sort_by(|a, b| cmp_dates(&a.acquired_date, &b.acquired_date, false)),
+        _ => {} // 0 = date added: leave in insertion order
+    }
+}
+
+// Compare two ISO dates. Undated ("") always sorts LAST regardless of direction.
+// ascending=true => old to new; false => new to old.
+fn cmp_dates(a: &str, b: &str, ascending: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let ae = a.is_empty(); let be = b.is_empty();
+    match (ae, be) {
+        (true, true)  => Ordering::Equal,
+        (true, false) => Ordering::Greater, // a undated -> after b
+        (false, true) => Ordering::Less,    // b undated -> after a
+        (false, false) => if ascending { a.cmp(b) } else { b.cmp(a) },
+    }
+}
+
 fn to_slint_items(data: &AppData, coll_id: &str, search: &str) -> slint::ModelRc<ItemData> {
-    let search_lc = search.to_lowercase();
-    let v: Vec<ItemData> = data.items.iter()
-        .filter(|i| i.collection_id == coll_id)
-        .filter(|i| {
-            if search_lc.is_empty() { return true; }
-            let fields_match = i.custom_fields.iter().any(|f|
-                f.value.to_lowercase().contains(&search_lc) ||
-                f.label.to_lowercase().contains(&search_lc)
-            );
-            i.name.to_lowercase().contains(&search_lc)
-                || i.short_desc.to_lowercase().contains(&search_lc)
-                || fields_match
-        })
-        .map(|i| {
-            let has_photo = i.thumbnail_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
-            let thumbnail = if has_photo {
-                thumbnail_image(i.thumbnail_path.as_deref().unwrap_or(""))
-            } else { slint::Image::default() };
-            ItemData {
-                id: i.id.clone().into(), name: i.name.clone().into(),
-                short_desc: i.short_desc.clone().into(),
-                has_photo, thumbnail,
-                collection_id: i.collection_id.clone().into(),
-            }
-        }).collect();
+    let items = filtered_items(data, coll_id, search);
+    let v: Vec<ItemData> = items.iter().map(|i| {
+        let has_photo = i.primary_photo().is_some();
+        let thumbnail = if let Some(p) = i.primary_photo() {
+            thumbnail_image(p)
+        } else { slint::Image::default() };
+        ItemData {
+            id: i.id.clone().into(), name: i.name.clone().into(),
+            short_desc: i.short_desc.clone().into(),
+            has_photo, thumbnail,
+            collection_id: i.collection_id.clone().into(),
+        }
+    }).collect();
     slint::ModelRc::new(slint::VecModel::from(v))
 }
 
@@ -288,30 +409,88 @@ fn bool_model(len: usize) -> slint::ModelRc<CheckedItem> {
 
 fn clear_detail(ui: &AppWindow) {
     ui.set_detail_name("".into()); ui.set_detail_desc("".into());
+    ui.set_detail_year("".into()); ui.set_detail_month("".into()); ui.set_detail_day("".into());
     ui.set_detail_has_photo(false);
     ui.set_detail_photo(slint::Image::default());
+    ui.set_detail_photos(slint::ModelRc::new(slint::VecModel::from(vec![])));
     ui.set_detail_fields(slint::ModelRc::new(slint::VecModel::from(vec![])));
 }
 
 fn load_detail(ui: &AppWindow, item: &Item) {
     ui.set_detail_name(item.name.clone().into());
     ui.set_detail_desc(item.short_desc.clone().into());
-    let has_photo = item.thumbnail_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
+    // Split ISO acquired_date "YYYY-MM-DD" into the three boxes (blank if empty)
+    let (y, m, d) = split_iso_date(&item.acquired_date);
+    ui.set_detail_year(y.into());
+    ui.set_detail_month(m.into());
+    ui.set_detail_day(d.into());
+    let has_photo = item.primary_photo().is_some();
     ui.set_detail_has_photo(has_photo);
-    if has_photo {
-        if let Some(img) = load_slint_image(item.thumbnail_path.as_deref().unwrap_or("")) {
-            ui.set_detail_photo(img);
-        }
+    if let Some(p) = item.primary_photo() {
+        // Use the cached thumbnail for the 140px main image (fast). The full
+        // original is only decoded when the user opens the lightbox.
+        ui.set_detail_photo(thumbnail_image(p));
     } else {
         ui.set_detail_photo(slint::Image::default());
     }
+    // Build the horizontal photo-strip model (small thumbnails of all photos)
+    ui.set_detail_photos(to_slint_photos(item));
     ui.set_detail_fields(to_slint_fields(item));
+}
+
+// Build the photo-strip model: one entry per photo, using cached thumbnails.
+fn to_slint_photos(item: &Item) -> slint::ModelRc<PhotoData> {
+    let v: Vec<PhotoData> = item.photos.iter().enumerate()
+        .filter(|(_, p)| !p.is_empty())
+        .map(|(idx, p)| PhotoData {
+            index: idx as i32,
+            is_main: idx == 0,
+            thumbnail: thumbnail_image(p),
+        }).collect();
+    slint::ModelRc::new(slint::VecModel::from(v))
 }
 
 fn flush_detail(ui: &AppWindow, item: &mut Item) {
     item.name       = ui.get_detail_name().to_string();
     item.short_desc = ui.get_detail_desc().to_string();
+    item.acquired_date = assemble_iso_date(
+        &ui.get_detail_year().to_string(),
+        &ui.get_detail_month().to_string(),
+        &ui.get_detail_day().to_string(),
+    );
     // Fields are saved live via custom-field-value-changed, so no flush needed here
+}
+
+// "2023-03-15" -> ("2023","03","15"); "" -> ("","",""); zero parts -> blank
+fn split_iso_date(iso: &str) -> (String, String, String) {
+    if iso.is_empty() { return (String::new(), String::new(), String::new()); }
+    let parts: Vec<&str> = iso.split('-').collect();
+    let blank_if_zero = |s: &str| {
+        let n: i32 = s.parse().unwrap_or(0);
+        if n == 0 { String::new() } else { s.to_string() }
+    };
+    let y = blank_if_zero(parts.get(0).copied().unwrap_or(""));
+    let m = blank_if_zero(parts.get(1).copied().unwrap_or(""));
+    let d = blank_if_zero(parts.get(2).copied().unwrap_or(""));
+    (y, m, d)
+}
+
+// Assemble three boxes into ISO. All-blank => "" (undated). Otherwise blanks
+// become zeros so partial dates are preserved: blank year=0000, blank month/day=00.
+// Values clamped to sane ranges (month 1-12, day 1-31) only when non-zero.
+fn assemble_iso_date(y: &str, m: &str, d: &str) -> String {
+    let yt = y.trim(); let mt = m.trim(); let dt = d.trim();
+    if yt.is_empty() && mt.is_empty() && dt.is_empty() { return String::new(); }
+    let year: i32 = yt.parse().unwrap_or(0).clamp(0, 9999);
+    let month: i32 = {
+        let v = mt.parse().unwrap_or(0);
+        if v == 0 { 0 } else { v.clamp(1, 12) }
+    };
+    let day: i32 = {
+        let v = dt.parse().unwrap_or(0);
+        if v == 0 { 0 } else { v.clamp(1, 31) }
+    };
+    format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
 fn set_status(ui: &AppWindow, msg: impl Into<slint::SharedString>) {
@@ -322,7 +501,7 @@ fn set_status(ui: &AppWindow, msg: impl Into<slint::SharedString>) {
 
 fn filtered_items<'a>(data: &'a AppData, coll_id: &str, search: &str) -> Vec<&'a Item> {
     let search_lc = search.to_lowercase();
-    data.items.iter()
+    let mut v: Vec<&Item> = data.items.iter()
         .filter(|i| i.collection_id == coll_id)
         .filter(|i| {
             if search_lc.is_empty() { return true; }
@@ -334,20 +513,29 @@ fn filtered_items<'a>(data: &'a AppData, coll_id: &str, search: &str) -> Vec<&'a
                 || i.short_desc.to_lowercase().contains(&search_lc)
                 || fields_match
         })
-        .collect()
+        .collect();
+    sort_items(&mut v, get_item_sort());
+    v
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 fn main() {
-    let app_data  = load_data();
+    let mut app_data = load_data();
     let settings  = load_settings();
     let ui        = AppWindow::new().expect("Failed to create window");
+
+    // Initialize sort modes from settings before building any models
+    set_item_sort(settings.item_sort);
+    set_coll_sort(settings.coll_sort);
+    sort_collections(&mut app_data, settings.coll_sort);
 
     apply_theme(&ui, settings.dark_mode, &settings.accent_hex);
     ui.set_left_width(settings.left_panel_width);
     ui.set_mid_width(settings.mid_panel_width);
     ui.global::<Theme>().set_ui_font_size(settings.font_size);
+    ui.set_coll_sort_mode(settings.coll_sort);
+    ui.set_item_sort_mode(settings.item_sort);
     ui.set_collections(to_slint_collections(&app_data));
     ui.set_templates(to_slint_templates(&app_data));
     ui.set_coll_checked(bool_model(app_data.collections.len()));
@@ -537,7 +725,7 @@ fn main() {
             if let Some(c) = d.collections.get(idx as usize) {
                 let cid = c.id.clone();
                 for item in d.items.iter().filter(|i| i.collection_id == cid) {
-                    if let Some(p) = &item.thumbnail_path { std::fs::remove_file(p).ok(); }
+                    for p in &item.photos { delete_photo_files(p); }
                 }
                 d.items.retain(|i| i.collection_id != cid);
                 d.collections.remove(idx as usize);
@@ -601,7 +789,7 @@ fn main() {
             {
                 let mut d = data.borrow_mut();
                 if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
-                    if let Some(p) = &item.thumbnail_path { std::fs::remove_file(p).ok(); }
+                    for p in &item.photos { delete_photo_files(p); }
                 }
                 d.items.retain(|i| i.id != item_id);
                 save_data(&d);
@@ -641,7 +829,7 @@ fn main() {
                 for mut item in src_items {
                     item.id = Uuid::new_v4().to_string();
                     item.collection_id = new_id.clone();
-                    item.thumbnail_path = None; // don't copy photo paths
+                    item.photos = item.photos.iter().filter_map(|p| copy_photo_file(p)).collect();
                     item.custom_fields = item.custom_fields.into_iter().map(|mut f| {
                         f.id = Uuid::new_v4().to_string(); f
                     }).collect();
@@ -674,7 +862,7 @@ fn main() {
                     let mut n = src.clone();
                     n.id = Uuid::new_v4().to_string();
                     n.name = format!("{} (copy)", src.name);
-                    n.thumbnail_path = None;
+                    n.photos = src.photos.iter().filter_map(|p| copy_photo_file(p)).collect();
                     n.custom_fields = n.custom_fields.into_iter().map(|mut f| {
                         f.id = Uuid::new_v4().to_string(); f
                     }).collect();
@@ -714,7 +902,7 @@ fn main() {
             };
             for id in &to_delete {
                 if let Some(item) = d.items.iter().find(|i| &i.id == id) {
-                    if let Some(p) = &item.thumbnail_path { std::fs::remove_file(p).ok(); }
+                    for p in &item.photos { delete_photo_files(p); }
                 }
             }
             d.items.retain(|i| !to_delete.contains(&i.id));
@@ -752,7 +940,7 @@ fn main() {
             for mut item in to_dup {
                 item.id = Uuid::new_v4().to_string();
                 item.name = format!("{} (copy)", item.name);
-                item.thumbnail_path = None;
+                item.photos = item.photos.iter().filter_map(|p| copy_photo_file(p)).collect();
                 item.custom_fields = item.custom_fields.into_iter().map(|mut f| {
                     f.id = Uuid::new_v4().to_string(); f
                 }).collect();
@@ -801,9 +989,41 @@ fn main() {
         });
     }
 
+    // ── count-words (live word counter for the field editor) ──────────────────
+    {
+        let ui_w = weak!();
+        ui.on_count_words(move |text| {
+            let ui = ui_w.unwrap();
+            let n = text.split_whitespace().count() as i32;
+            ui.set_field_editor_wordcount(n);
+        });
+    }
+
     // ── field-changed ─────────────────────────────────────────────────────────
-    // name and desc are handled via two-way bindings; this is a no-op
-    ui.on_field_changed(|_, _| {});
+    // Inline name/desc edits persist on Save via flush_detail. The field-editor
+    // modal calls this with "desc" to persist + refresh immediately.
+    {
+        let (ui_w, data, sel_item, sel_coll, search) =
+            (weak!(), data.clone(), sel_item.clone(), sel_coll.clone(), search.clone());
+        ui.on_field_changed(move |which, value| {
+            if which != "desc" { return; }
+            let ui = ui_w.unwrap();
+            let item_id = sel_item.borrow().clone().unwrap_or_default();
+            if item_id.is_empty() { return; }
+            let coll_id = sel_coll.borrow().clone().unwrap_or_default();
+            let value = truncate_words(&value, 200);
+            {
+                let mut d = data.borrow_mut();
+                if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
+                    item.short_desc = value.clone();
+                }
+                save_data(&d);
+            }
+            ui.set_detail_desc(value.into());
+            let d = data.borrow();
+            ui.set_items(to_slint_items(&d, &coll_id, &search.borrow()));
+        });
+    }
 
     // ── pick-photo ────────────────────────────────────────────────────────────
     {
@@ -814,38 +1034,116 @@ fn main() {
             let item_id = sel_item.borrow().clone().unwrap_or_default();
             if item_id.is_empty() { return; }
             let picked = rfd::FileDialog::new()
-                .set_title("Choose a photo")
+                .set_title("Choose photos")
                 .add_filter("Images", &["png","jpg","jpeg","webp","gif"])
-                .pick_file();
-            if let Some(src_path) = picked {
-                let ext = src_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
-                let dest = photos_dir().join(format!("{}.{}", Uuid::new_v4(), ext));
-                match std::fs::copy(&src_path, &dest) {
-                    Ok(_) => {
-                        let path_str = dest.to_string_lossy().to_string();
-                        let coll_id = {
-                            let mut d = data.borrow_mut();
-                            let cid = d.items.iter().find(|i| i.id == item_id)
-                                .map(|i| i.collection_id.clone()).unwrap_or_default();
-                            // Remove old photo
-                            if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
-                                if let Some(old) = &item.thumbnail_path {
-                                    if !old.is_empty() { std::fs::remove_file(old).ok(); }
-                                }
-                            }
-                            if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
-                                item.thumbnail_path = Some(path_str.clone());
-                            }
-                            save_data(&d);
-                            cid
-                        };
-                        ui.set_detail_has_photo(true);
-                        if let Some(img) = load_slint_image(&path_str) { ui.set_detail_photo(img); }
-                        let d2 = data.borrow();
-                        ui.set_items(to_slint_items(&d2, &coll_id, &search.borrow()));
-                        ui.set_status_message("".into());
+                .pick_files();
+            if let Some(src_paths) = picked {
+                let coll_id = {
+                    let mut d = data.borrow_mut();
+                    // Preserve any unsaved edits in the text boxes before we mutate the item
+                    if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
+                        flush_detail(&ui, item);
                     }
-                    Err(e) => set_status(&ui, format!("Could not copy photo: {e}")),
+                    let cid = d.items.iter().find(|i| i.id == item_id)
+                        .map(|i| i.collection_id.clone()).unwrap_or_default();
+                    for src_path in &src_paths {
+                        let ext = src_path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+                        let dest = photos_dir().join(format!("{}.{}", Uuid::new_v4(), ext));
+                        if std::fs::copy(src_path, &dest).is_ok() {
+                            let path_str = dest.to_string_lossy().to_string();
+                            generate_thumbnail(&path_str);
+                            if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
+                                item.photos.push(path_str);
+                            }
+                        }
+                    }
+                    save_data(&d);
+                    cid
+                };
+                // Refresh only the photo views — NOT the text boxes (preserve edits)
+                let d = data.borrow();
+                if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
+                    ui.set_detail_has_photo(item.primary_photo().is_some());
+                    if let Some(p) = item.primary_photo() {
+                        ui.set_detail_photo(thumbnail_image(p));
+                    }
+                    ui.set_detail_photos(to_slint_photos(item));
+                }
+                ui.set_items(to_slint_items(&d, &coll_id, &search.borrow()));
+                ui.set_status_message("".into());
+            }
+        });
+    }
+
+    // ── remove-photo (by index in the item's photos list) ─────────────────────
+    {
+        let (ui_w, data, sel_item, sel_coll, search) =
+            (weak!(), data.clone(), sel_item.clone(), sel_coll.clone(), search.clone());
+        ui.on_remove_photo(move |idx| {
+            let ui = ui_w.unwrap();
+            let item_id = sel_item.borrow().clone().unwrap_or_default();
+            if item_id.is_empty() { return; }
+            let coll_id = sel_coll.borrow().clone().unwrap_or_default();
+            {
+                let mut d = data.borrow_mut();
+                if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
+                    let i = idx as usize;
+                    if i < item.photos.len() {
+                        let removed = item.photos.remove(i);
+                        delete_photo_files(&removed);
+                    }
+                }
+                save_data(&d);
+            }
+            let d = data.borrow();
+            if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
+                load_detail(&ui, item);
+            }
+            ui.set_items(to_slint_items(&d, &coll_id, &search.borrow()));
+        });
+    }
+
+    // ── set-main-photo (move chosen photo to front; preserves rest order) ─────
+    {
+        let (ui_w, data, sel_item, sel_coll, search) =
+            (weak!(), data.clone(), sel_item.clone(), sel_coll.clone(), search.clone());
+        ui.on_set_main_photo(move |idx| {
+            let ui = ui_w.unwrap();
+            let item_id = sel_item.borrow().clone().unwrap_or_default();
+            if item_id.is_empty() { return; }
+            let coll_id = sel_coll.borrow().clone().unwrap_or_default();
+            {
+                let mut d = data.borrow_mut();
+                if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
+                    let i = idx as usize;
+                    if i < item.photos.len() && i != 0 {
+                        let chosen = item.photos.remove(i);
+                        item.photos.insert(0, chosen);
+                    }
+                }
+                save_data(&d);
+            }
+            let d = data.borrow();
+            if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
+                load_detail(&ui, item);
+            }
+            ui.set_items(to_slint_items(&d, &coll_id, &search.borrow()));
+        });
+    }
+
+    // ── lightbox-load (load full-res photo at index into lightbox-photo) ──────
+    {
+        let (ui_w, data, sel_item) = (weak!(), data.clone(), sel_item.clone());
+        ui.on_lightbox_load(move |idx| {
+            let ui = ui_w.unwrap();
+            let item_id = sel_item.borrow().clone().unwrap_or_default();
+            if item_id.is_empty() { return; }
+            let d = data.borrow();
+            if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
+                if let Some(p) = item.photos.get(idx as usize) {
+                    if let Some(img) = load_slint_image(p) {
+                        ui.set_lightbox_photo(img);
+                    }
                 }
             }
         });
@@ -916,15 +1214,19 @@ fn main() {
     {
         let (ui_w, data, sel_item) = (weak!(), data.clone(), sel_item.clone());
         ui.on_custom_field_value_changed(move |field_id, new_value| {
-            let _ui = ui_w.unwrap();
+            let ui = ui_w.unwrap();
             let item_id = sel_item.borrow().clone().unwrap_or_default();
             if item_id.is_empty() { return; }
             let mut d = data.borrow_mut();
             if let Some(item) = d.items.iter_mut().find(|i| i.id == item_id) {
                 if let Some(field) = item.custom_fields.iter_mut().find(|f| f.id == field_id.as_str()) {
-                    field.value = new_value.to_string();
+                    field.value = truncate_words(&new_value, 200);
                 }
                 save_data(&d);
+                // Refresh the displayed fields so inline boxes show the new value
+                if let Some(item) = d.items.iter().find(|i| i.id == item_id) {
+                    ui.set_detail_fields(to_slint_fields(item));
+                }
             }
         });
     }
@@ -1091,6 +1393,62 @@ fn main() {
         });
     }
 
+    // ── set-coll-sort ─────────────────────────────────────────────────────────
+    {
+        let (ui_w, data, cfg, coll_search, sel_coll, anchor_coll) =
+            (weak!(), data.clone(), cfg.clone(), coll_search.clone(), sel_coll.clone(), anchor_coll.clone());
+        ui.on_set_coll_sort(move |mode| {
+            let ui = ui_w.unwrap();
+            set_coll_sort(mode);
+            { let mut s = cfg.borrow_mut(); s.coll_sort = mode; save_settings(&s); }
+            let sel_id = sel_coll.borrow().clone();
+            let mut d = data.borrow_mut();
+            sort_collections(&mut d, mode);
+            ui.set_collections(collections_model(&d, &coll_search.borrow()));
+            ui.set_coll_checked(bool_model(d.collections.len()));
+            if let Some(id) = sel_id {
+                if let Some(pos) = d.collections.iter().position(|c| c.id == id) {
+                    ui.set_selected_collection(pos as i32);
+                    *anchor_coll.borrow_mut() = Some(pos);  // anchor follows the selected collection
+                } else {
+                    ui.set_selected_collection(-1);
+                    *anchor_coll.borrow_mut() = None;
+                }
+            } else {
+                *anchor_coll.borrow_mut() = None;
+            }
+            ui.set_coll_multi_mode(false);
+        });
+    }
+
+    // ── set-item-sort ─────────────────────────────────────────────────────────
+    {
+        let (ui_w, data, cfg, sel_coll, sel_item, search, anchor_item) =
+            (weak!(), data.clone(), cfg.clone(), sel_coll.clone(), sel_item.clone(), search.clone(), anchor_item.clone());
+        ui.on_set_item_sort(move |mode| {
+            let ui = ui_w.unwrap();
+            set_item_sort(mode);
+            { let mut s = cfg.borrow_mut(); s.item_sort = mode; save_settings(&s); }
+            let coll_id = sel_coll.borrow().clone().unwrap_or_default();
+            if coll_id.is_empty() { return; }
+            let sel_id = sel_item.borrow().clone();
+            let d = data.borrow();
+            let items = to_slint_items(&d, &coll_id, &search.borrow());
+            let n = items.row_count();
+            ui.set_items(items);
+            ui.set_item_checked(bool_model(n));
+            if let Some(id) = sel_id {
+                let pos = filtered_items(&d, &coll_id, &search.borrow())
+                    .iter().position(|i| i.id == id);
+                ui.set_selected_item(pos.map(|p| p as i32).unwrap_or(-1));
+                *anchor_item.borrow_mut() = pos;  // anchor follows selected item to its new position
+            } else {
+                *anchor_item.borrow_mut() = None;
+            }
+            ui.set_item_multi_mode(false);
+        });
+    }
+
     // ── collection-icon-clicked ───────────────────────────────────────────────
     {
         let (ui_w, icon_target) = (weak!(), icon_target.clone());
@@ -1165,7 +1523,7 @@ fn main() {
             // Delete photos of items in those collections
             for cid in &to_delete {
                 for item in d.items.iter().filter(|i| &i.collection_id == cid) {
-                    if let Some(p) = &item.thumbnail_path { std::fs::remove_file(p).ok(); }
+                    for p in &item.photos { delete_photo_files(p); }
                 }
             }
             d.items.retain(|i| !to_delete.contains(&i.collection_id));
@@ -1209,7 +1567,7 @@ fn main() {
                     for mut it in src_items {
                         it.id = Uuid::new_v4().to_string();
                         it.collection_id = new_id.clone();
-                        it.thumbnail_path = None;
+                        it.photos = it.photos.iter().filter_map(|p| copy_photo_file(p)).collect();
                         it.custom_fields = it.custom_fields.into_iter().map(|mut f| { f.id = Uuid::new_v4().to_string(); f }).collect();
                         d.items.push(it);
                     }
