@@ -5,18 +5,6 @@ Built with **Rust + Slint** and written by Claude, Opus 4.8.
 
 ---
 
-## What's new in v0.2
-
-| Feature | Details |
-|---|---|
-| **Resizable panels** | Drag the dividers between all three panels; sizes persist across sessions |
-| **Light / Dark mode** | Toggle in Settings (⚙ icon); preference saved |
-| **Accent colour** | 8 presets in Settings; deriveds (dim, glow, text) computed automatically |
-| **Export** | Saves full JSON to `~/Documents/collector-export.json` |
-| **Import** | Merges from `~/Documents/collector-export.json`; duplicates skipped by ID |
-
----
-
 ## Features
 
 - Three-panel layout: Collections → Items → Detail
