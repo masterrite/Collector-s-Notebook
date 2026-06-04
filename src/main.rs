@@ -525,6 +525,17 @@ fn main() {
     let settings  = load_settings();
     let ui        = AppWindow::new().expect("Failed to create window");
 
+    // Set the window/title-bar icon (embedded at compile time).
+    {
+        let icon_bytes = include_bytes!("../assets/icons/Collector.png");
+        if let Ok(img) = image::load_from_memory(icon_bytes) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&rgba, w, h);
+            ui.set_window_icon(slint::Image::from_rgba8(buf));
+        }
+    }
+
     // Initialize sort modes from settings before building any models
     set_item_sort(settings.item_sort);
     set_coll_sort(settings.coll_sort);

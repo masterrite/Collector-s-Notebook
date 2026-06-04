@@ -1,6 +1,6 @@
 [package]
 name = "Collector"
-version = "0.6.2"
+version = "1.0.0"
 edition = "2021"
 description = "Personal item collection cataloguing app"
 
@@ -20,7 +20,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 [build-dependencies]
 slint-build = "1.16.1"
 
+# Windows-only: embeds the .exe icon (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [profile.release]
 strip = true
-lto = true
-codegen-units = 1
