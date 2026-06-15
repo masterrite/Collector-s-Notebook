@@ -1,11 +1,12 @@
+// build.rs — embeds the taskbar/exe icon on Windows. Harmless no-op on other OSes.
 fn main() {
-    slint_build::compile("ui/main.slint").unwrap();
-
-    // On Windows, embed the application icon into the .exe.
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     {
-        let mut res = winresource::WindowsResource::new();
-        res.set_icon("assets/icons/Collectors-Notebook.ico");
-        res.compile().unwrap();
+        let icon = "assets/icons/Collectors-Notebook.ico";
+        if std::path::Path::new(icon).exists() {
+            let mut res = winres::WindowsResource::new();
+            res.set_icon(icon);
+            let _ = res.compile();
+        }
     }
 }

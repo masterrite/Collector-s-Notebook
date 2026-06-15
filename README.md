@@ -38,6 +38,15 @@ Just don't use it as a diary. It has a 200 word limit for each field.
 - Simplified Chinese, Japanese, and Korean support for input texts (no UI translation)
 - Small size! Less than 30 MB depends on how you build it, and can go down to ~18 MB on Windows
 
+## New in v2.0
+
+v2.0 is a full migration from Slint UI to Iced UI. This should bring improvements such as:
+- New architecture
+- Actual scrollable multi-line fields, no word limit. The fields can still enlarge to a viewable, editable panel, of course. Enlarging automatically enters edit mode in the right panel
+- Emoji don't clip at any font size anymore. True rendering of full-color emoji in Noto Color Emoji fonts
+
+Hopefully everything else is preserved.
+
 ---
 
 ## Project Structure
@@ -47,12 +56,17 @@ collector/
 ├── Cargo.toml
 ├── build.rs
 ├── assets/
-│   └── fonts            # Embeded Simplified Chinese, Japanese, and Korean font
-│   └── icons            # Hand drawn icons by yours truly
-├── src/
-│   └── main.rs          # Data model, persistence, settings, all UI callbacks
-└── ui/
-    └── main.slint       # Full UI: panels, drag handles, settings modal, theme
+│   ├── fonts            # Embeded Simplified Chinese, Japanese, and Korean font
+│   ├── icons            # Hand drawn icons by yours truly
+│   └── logo.png    	 # For the title bar logo and settings
+└── src/
+    ├── main.rs
+    ├── image_util.rs
+    ├── model.rs
+    ├── theme.rs
+    ├── update.rs
+    └── view.rs
+
 ```
 
 ---
@@ -62,7 +76,7 @@ collector/
 ### Prerequisites
 
 - **Rust stable** — https://rustup.rs
-- **Linux extras**: `sudo apt install libxcb-shape0-dev libxkbcommon-dev libfontconfig1-dev`
+- **Linux extras**: `sudo apt install libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev`
 - macOS / Windows: no extras needed
 
 ```bash
