@@ -21,7 +21,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 winres = { package = "winresource", version = "0.1" }
 
 [profile.release]
-opt-level = z
+opt-level = "z"
 lto = true
 strip = true
 codegen-units = 1
