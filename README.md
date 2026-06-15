@@ -34,7 +34,7 @@ The traveler's notebook is basically a piece of leather wrapped around papers. T
 - Zoom images in/out 10x, and the ability to attach multiple photos to an item entry
 - Local JSON storage that you can migrate between machines with export/import
 - Simplified Chinese, Japanese, and Korean support for input texts (no UI translation)
-- Small size! Less than 30 MB depends on how you build it, and can go down to ~18 MB on Windows
+- Small size! Less than 30 MB depends on how you build it, and can go down to ~22 MB on Windows
 
 ## New in v2.0!!!
 
