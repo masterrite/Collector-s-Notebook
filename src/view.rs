@@ -21,6 +21,110 @@ fn boxspace(w: impl Into<Length>, h: impl Into<Length>) -> iced::widget::Space {
     iced::widget::Space::new().width(w).height(h)
 }
 
+// ── text_editor key bindings (word ops + Tab field nav) ─────────────────────
+//
+// iced 0.14's text_editor lets us override key handling with `.key_binding()`,
+// a closure `Fn(KeyPress) -> Option<Binding<Message>>`. Returning `Some(b)`
+// runs binding `b`; returning `None` makes the key do nothing. Because a custom
+// closure *replaces* the defaults entirely, anything we don't handle explicitly
+// is forwarded to `Binding::from_key_press(kp)` so normal typing, Enter, plain
+// Backspace/Delete, arrows, copy/paste, etc. keep working.
+//
+// The "jump" modifier (`Modifiers::jump()`) is Ctrl on Windows/Linux and Option
+// on macOS — the native word-wise modifier on each platform.
+
+/// Word-wise operations shared by every editor. Returns `Some(..)` only when the
+/// jump modifier is held together with Backspace/Delete/Arrow; otherwise `None`
+/// so the caller can fall through to default handling.
+fn editor_word_binding(kp: &text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    use iced::keyboard::key::Named;
+    use iced::keyboard::Key;
+    use text_editor::{Binding, Motion};
+
+    let word = kp.modifiers.jump();
+    if !word {
+        return None;
+    }
+    let shift = kp.modifiers.shift();
+    let Key::Named(named) = &kp.key else {
+        return None;
+    };
+    match named {
+        // Ctrl/Option+Backspace — delete the word to the left: select it, then delete.
+        Named::Backspace => Some(Binding::Sequence(vec![
+            Binding::Select(Motion::WordLeft),
+            Binding::Backspace,
+        ])),
+        // Ctrl/Option+Delete — delete the word to the right.
+        Named::Delete => Some(Binding::Sequence(vec![
+            Binding::Select(Motion::WordRight),
+            Binding::Delete,
+        ])),
+        // Ctrl/Option+Left/Right — jump by word (extend the selection if Shift is held).
+        Named::ArrowLeft => Some(if shift {
+            Binding::Select(Motion::WordLeft)
+        } else {
+            Binding::Move(Motion::WordLeft)
+        }),
+        Named::ArrowRight => Some(if shift {
+            Binding::Select(Motion::WordRight)
+        } else {
+            Binding::Move(Motion::WordRight)
+        }),
+        _ => None,
+    }
+}
+
+/// Stable widget id for the detail editor at tab-order position `idx`.
+/// Ordering: 0 name, 1 description, 2 year, 3 month, 4 day, then for each
+/// custom field i: 5+2i label, 6+2i value. These ids are what the Tab handler
+/// focuses, which keeps cycling confined to the right-hand detail panel and
+/// never reaches the search boxes in the other panes.
+fn detail_id(idx: usize) -> iced::widget::Id {
+    iced::widget::Id::new(format!("cn-detail-{idx}"))
+}
+
+/// Builds the key-binding closure for the detail editor at position `idx`,
+/// where `total` is the number of detail editors currently shown. Word ops are
+/// shared; Tab/Shift+Tab move to the next/previous detail editor (wrapping),
+/// emitting a focus-by-id message rather than iced's global focus traversal.
+fn detail_keys(
+    idx: usize,
+    total: usize,
+) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    move |kp| {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::Key;
+        use text_editor::Binding;
+
+        if let Some(b) = editor_word_binding(&kp) {
+            return Some(b);
+        }
+        // Tab → next detail field, Shift+Tab → previous, wrapping within the
+        // panel. Overrides text_editor's default Tab-indents-line behavior here.
+        if let Key::Named(Named::Tab) = &kp.key {
+            let target = if total == 0 {
+                0
+            } else if kp.modifiers.shift() {
+                (idx + total - 1) % total
+            } else {
+                (idx + 1) % total
+            };
+            return Some(Binding::Custom(Message::FocusDetail(target)));
+        }
+        Binding::from_key_press(kp)
+    }
+}
+
+/// Key bindings for modal / overlay editors: word ops only. Tab is left to the
+/// editor's default so focus can't escape the modal into hidden base widgets.
+fn editor_keys_basic(kp: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if let Some(b) = editor_word_binding(&kp) {
+        return Some(b);
+    }
+    text_editor::Binding::from_key_press(kp)
+}
+
 // ── small style/element helpers ─────────────────────────────────────────────
 
 /// Truncate a string to a single display line of roughly `max` characters,
@@ -553,6 +657,9 @@ impl App {
     fn detail_body(&self) -> Element<'_, Message> {
         let p = self.palette;
         let editing = self.is_editing;
+        // Number of detail editors for Tab cycling: name, description, year,
+        // month, day (5) + label/value per custom field (2 each).
+        let detail_total = 5 + self.editors.fields.len() * 2;
 
         // top bar
         let edit_label = if editing { "Save" } else { "Edit" };
@@ -634,6 +741,8 @@ impl App {
             ],
             text_editor(&self.editors.name)
                 .on_action(Message::NameEdited)
+                .id(detail_id(0))
+                .key_binding(detail_keys(0, detail_total))
                 .font(CJK).size(self.fs() + 1.0)
                 .padding(8)
                 // Name is a single line; it scrolls horizontally past that.
@@ -650,6 +759,8 @@ impl App {
             ],
             text_editor(&self.editors.desc)
                 .on_action(Message::DescEdited)
+                .id(detail_id(1))
+                .key_binding(detail_keys(1, detail_total))
                 .font(CJK).size(self.fs())
                 // Fixed three-line box. The editor renders at ~1.0x line height
                 // (not the 1.3 the text widget uses), so size off ~1.15x per line
@@ -732,11 +843,11 @@ impl App {
         body = body.push(self.subheader("Date Acquired"));
         if editing {
             body = body.push(container(row![
-                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY"),
+                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY", 2, detail_total),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM"),
+                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM", 3, detail_total),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD"),
+                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD", 4, detail_total),
             ].spacing(6).align_y(iced::Alignment::Center)).center_x(Fill));
         } else if let Some(it) = self.selected_item() {
             body = body.push(container(self.body(display_date(&it.acquired_date))).center_x(Fill));
@@ -760,6 +871,8 @@ impl App {
             let label_el: Element<Message> = if editing {
                 text_editor(&self.editors.fields[i].1)
                     .on_action(move |a| Message::FieldLabelEdited(i, a))
+                    .id(detail_id(5 + i * 2))
+                    .key_binding(detail_keys(5 + i * 2, detail_total))
                     .font(CJK).size((self.fs() - 4.0).max(9.0))
                     .padding(4)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -785,6 +898,8 @@ impl App {
             field_row = field_row.push(
                 text_editor(&self.editors.fields[i].2)
                     .on_action(move |a| Message::FieldValueEdited(i, a))
+                    .id(detail_id(6 + i * 2))
+                    .key_binding(detail_keys(6 + i * 2, detail_total))
                     .font(CJK).size(self.fs())
                     .min_height(self.fs() * 1.3 + 16.0)
                     .max_height(self.fs() * 1.3 * 3.0 + 16.0)
@@ -803,11 +918,13 @@ impl App {
     fn tiny_editor<'a>(
         &'a self, content: &'a text_editor::Content,
         on_action: impl Fn(text_editor::Action) -> Message + 'a,
-        width: f32, _placeholder: &str,
+        width: f32, _placeholder: &str, idx: usize, total: usize,
     ) -> Element<'a, Message> {
         container(
             text_editor(content)
                 .on_action(on_action)
+                .id(detail_id(idx))
+                .key_binding(detail_keys(idx, total))
                 .font(CJK).size(self.fs() - 1.0)
                 .padding(6)
                 .style(self.editor_style(true))
@@ -1279,6 +1396,7 @@ impl App {
                     let ed = &self.template_rename.as_ref().unwrap().1;
                     row![
                         text_editor(ed).on_action(Message::TemplateRenameEdited)
+                            .key_binding(editor_keys_basic)
                             .font(CJK).size(self.fs() - 2.0).padding(4)
                             .style(self.editor_style(true)),
                         self.small_action("OK", Message::CommitTemplateRename),
@@ -1411,6 +1529,7 @@ impl App {
             self.body(self.name_title.clone()),
             text_editor(&self.name_value)
                 .on_action(Message::NameValueEdited)
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs()).padding(8)
                 .min_height(self.fs() * 1.3 + 16.0)
                 .max_height(self.fs() * 1.3 * 3.0 + 16.0)
@@ -1450,6 +1569,7 @@ impl App {
                 .align_y(iced::Alignment::Center),
             text_editor(content)
                 .on_action(on_action)
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs())
                 .height(Fill)
                 .padding(10)
@@ -1467,6 +1587,7 @@ impl App {
                 .align_y(iced::Alignment::Center),
             text_editor(content)
                 .on_action(move |a| Message::FieldValueEdited(i, a))
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs())
                 .height(Fill)
                 .padding(10)

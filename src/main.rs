@@ -294,6 +294,8 @@ enum Message {
     FieldValueEdited(usize, EdAction),
     AddCustomField,
     DeleteCustomField(String),
+    FocusDetail(usize),  // Tab/Shift+Tab: focus a detail editor by tab-order index
+    SaveShortcut,        // Ctrl+S / Cmd+S: save edited fields, stay in edit mode
 
     // search
     ItemSearchChanged(String),
@@ -459,6 +461,15 @@ impl App {
             }
             Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Named(Named::ArrowRight), .. }) => {
                 Some(Message::LightboxArrowNext)
+            }
+            // Ctrl+S / Cmd+S saves the in-progress edits (handled in update,
+            // which no-ops when not editing). `command()` is Ctrl on
+            // Windows/Linux and Cmd on macOS. Seen even while a text editor is
+            // focused because we listen regardless of capture status.
+            Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Character(c), modifiers, .. })
+                if modifiers.command() && c.as_str().eq_ignore_ascii_case("s") =>
+            {
+                Some(Message::SaveShortcut)
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 Some(Message::CursorMoved(position))

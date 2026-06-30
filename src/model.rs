@@ -184,6 +184,7 @@ pub fn settings_path() -> PathBuf { let mut p = app_dir(); p.push("settings.json
 
 // ─── Persistence ────────────────────────────────────────────────────────────
 
+#[allow(dead_code)] // convenience wrapper; the app uses load_data_reporting directly
 pub fn load_data() -> AppData {
     load_data_reporting().0
 }
