@@ -334,19 +334,26 @@ impl App {
                 if let Some((_, _, val)) = self.editors.fields.get_mut(i) { val.perform(a); }
                 Task::none()
             }
-            // Tab / Shift+Tab from detail editor `from`: resolve the target from
-            // the live editor count (name, desc, year, month, day = 5, plus two
-            // per custom field) and focus it by id, wrapping within the panel.
+            // Tab / Shift+Tab from detail editor `from`. By-id focus doesn't
+            // work for text_editor here, so we use positional focus_next/
+            // focus_previous (which do). The detail editors are the only
+            // focusable widgets after the search boxes in tree order, so moving
+            // among them stays in the panel — we just clamp at the ends so Tab
+            // can't step off into the search boxes. `total` = name, desc, year,
+            // month, day (5) + two per custom field.
             Message::TabField(from, forward) => {
                 let total = 5 + self.editors.fields.len() * 2;
-                let next = if total == 0 {
-                    0
-                } else if forward {
-                    (from + 1) % total
+                if forward {
+                    if from + 1 < total {
+                        iced::widget::operation::focus_next()
+                    } else {
+                        Task::none()
+                    }
+                } else if from > 0 {
+                    iced::widget::operation::focus_previous()
                 } else {
-                    (from + total - 1) % total
-                };
-                iced::widget::operation::focus(detail_id(next))
+                    Task::none()
+                }
             }
             // Ctrl+S / Cmd+S: persist the in-progress edits without leaving edit
             // mode. No-op when not editing so the shortcut is harmless elsewhere.

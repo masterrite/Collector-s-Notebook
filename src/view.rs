@@ -75,19 +75,12 @@ fn editor_word_binding(kp: &text_editor::KeyPress) -> Option<text_editor::Bindin
     }
 }
 
-/// Stable widget id for the detail editor at tab-order position `idx`.
-/// Ordering: 0 name, 1 description, 2 year, 3 month, 4 day, then for each
-/// custom field i: 5+2i label, 6+2i value. These ids are what the Tab handler
-/// focuses, which keeps cycling confined to the right-hand detail panel and
-/// never reaches the search boxes in the other panes.
-fn detail_id(idx: usize) -> iced::widget::Id {
-    iced::widget::Id::from(format!("cn-detail-{idx}"))
-}
-
 /// Builds the key-binding closure for the detail editor at position `idx`.
 /// Word ops are shared; Tab/Shift+Tab emit a message carrying this editor's
-/// index and the direction, and `update` resolves the actual target from the
-/// live editor count (so it can't go stale if fields are added/removed).
+/// index and the direction. `update` then moves focus positionally with
+/// focus_next/focus_previous, clamping at the ends so it stays in the panel.
+/// Index order: 0 name, 1 description, 2 year, 3 month, 4 day, then for each
+/// custom field i: 5+2i label, 6+2i value.
 fn detail_keys(
     idx: usize,
 ) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
@@ -730,7 +723,6 @@ impl App {
             ],
             text_editor(&self.editors.name)
                 .on_action(Message::NameEdited)
-                .id(detail_id(0))
                 .key_binding(detail_keys(0))
                 .font(CJK).size(self.fs() + 1.0)
                 .padding(8)
@@ -748,7 +740,6 @@ impl App {
             ],
             text_editor(&self.editors.desc)
                 .on_action(Message::DescEdited)
-                .id(detail_id(1))
                 .key_binding(detail_keys(1))
                 .font(CJK).size(self.fs())
                 // Fixed three-line box. The editor renders at ~1.0x line height
@@ -860,7 +851,6 @@ impl App {
             let label_el: Element<Message> = if editing {
                 text_editor(&self.editors.fields[i].1)
                     .on_action(move |a| Message::FieldLabelEdited(i, a))
-                    .id(detail_id(5 + i * 2))
                     .key_binding(detail_keys(5 + i * 2))
                     .font(CJK).size((self.fs() - 4.0).max(9.0))
                     .padding(4)
@@ -887,7 +877,6 @@ impl App {
             field_row = field_row.push(
                 text_editor(&self.editors.fields[i].2)
                     .on_action(move |a| Message::FieldValueEdited(i, a))
-                    .id(detail_id(6 + i * 2))
                     .key_binding(detail_keys(6 + i * 2))
                     .font(CJK).size(self.fs())
                     .min_height(self.fs() * 1.3 + 16.0)
@@ -912,7 +901,6 @@ impl App {
         container(
             text_editor(content)
                 .on_action(on_action)
-                .id(detail_id(idx))
                 .key_binding(detail_keys(idx))
                 .font(CJK).size(self.fs() - 1.0)
                 .padding(6)
