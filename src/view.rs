@@ -81,7 +81,7 @@ fn editor_word_binding(kp: &text_editor::KeyPress) -> Option<text_editor::Bindin
 /// focuses, which keeps cycling confined to the right-hand detail panel and
 /// never reaches the search boxes in the other panes.
 fn detail_id(idx: usize) -> iced::widget::Id {
-    iced::widget::Id::new(format!("cn-detail-{idx}"))
+    iced::widget::Id::from(format!("cn-detail-{idx}"))
 }
 
 /// Builds the key-binding closure for the detail editor at position `idx`,
