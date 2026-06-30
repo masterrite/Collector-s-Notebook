@@ -626,11 +626,9 @@ impl App {
             ].spacing(10).align_x(iced::Alignment::Center))
             .center_x(Fill).center_y(Fill).into()
         } else {
-            scrollable(self.detail_body())
-                .height(Fill)
-                .direction(scrollable::Direction::Vertical(
-                    scrollable::Scrollbar::new().width(8).scroller_width(8)))
-                .into()
+            // DIAGNOSTIC: scrollable temporarily removed to test whether it is
+            // scrambling Tab/focus order. Restore the scrollable wrapper after.
+            self.detail_body()
         };
 
         container(content)
