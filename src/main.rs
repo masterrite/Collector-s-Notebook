@@ -294,7 +294,6 @@ enum Message {
     FieldValueEdited(usize, EdAction),
     AddCustomField,
     DeleteCustomField(String),
-    TabField(usize, bool),  // Tab from detail editor #usize; bool = forward (false = Shift+Tab)
     SaveShortcut,        // Ctrl+S / Cmd+S: save edited fields, stay in edit mode
 
     // search

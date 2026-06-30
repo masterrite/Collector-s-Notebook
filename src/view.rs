@@ -75,32 +75,6 @@ fn editor_word_binding(kp: &text_editor::KeyPress) -> Option<text_editor::Bindin
     }
 }
 
-/// Builds the key-binding closure for the detail editor at position `idx`.
-/// Word ops are shared; Tab/Shift+Tab emit a message carrying this editor's
-/// index and the direction. `update` then moves focus positionally with
-/// focus_next/focus_previous, clamping at the ends so it stays in the panel.
-/// Index order: 0 name, 1 description, 2 year, 3 month, 4 day, then for each
-/// custom field i: 5+2i label, 6+2i value.
-fn detail_keys(
-    idx: usize,
-) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
-    move |kp| {
-        use iced::keyboard::key::Named;
-        use iced::keyboard::Key;
-        use text_editor::Binding;
-
-        if let Some(b) = editor_word_binding(&kp) {
-            return Some(b);
-        }
-        // Tab → next detail field, Shift+Tab → previous. Overrides text_editor's
-        // default Tab-indents-line behavior here.
-        if let Key::Named(Named::Tab) = &kp.key {
-            return Some(Binding::Custom(Message::TabField(idx, !kp.modifiers.shift())));
-        }
-        Binding::from_key_press(kp)
-    }
-}
-
 /// Key bindings for modal / overlay editors: word ops only. Tab is left to the
 /// editor's default so focus can't escape the modal into hidden base widgets.
 fn editor_keys_basic(kp: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
@@ -626,9 +600,11 @@ impl App {
             ].spacing(10).align_x(iced::Alignment::Center))
             .center_x(Fill).center_y(Fill).into()
         } else {
-            // DIAGNOSTIC: scrollable temporarily removed to test whether it is
-            // scrambling Tab/focus order. Restore the scrollable wrapper after.
-            self.detail_body()
+            scrollable(self.detail_body())
+                .height(Fill)
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::new().width(8).scroller_width(8)))
+                .into()
         };
 
         container(content)
@@ -721,7 +697,7 @@ impl App {
             ],
             text_editor(&self.editors.name)
                 .on_action(Message::NameEdited)
-                .key_binding(detail_keys(0))
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs() + 1.0)
                 .padding(8)
                 // Name is a single line; it scrolls horizontally past that.
@@ -738,7 +714,7 @@ impl App {
             ],
             text_editor(&self.editors.desc)
                 .on_action(Message::DescEdited)
-                .key_binding(detail_keys(1))
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs())
                 // Fixed three-line box. The editor renders at ~1.0x line height
                 // (not the 1.3 the text widget uses), so size off ~1.15x per line
@@ -821,11 +797,11 @@ impl App {
         body = body.push(self.subheader("Date Acquired"));
         if editing {
             body = body.push(container(row![
-                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY", 2),
+                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY"),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM", 3),
+                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM"),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD", 4),
+                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD"),
             ].spacing(6).align_y(iced::Alignment::Center)).center_x(Fill));
         } else if let Some(it) = self.selected_item() {
             body = body.push(container(self.body(display_date(&it.acquired_date))).center_x(Fill));
@@ -849,7 +825,7 @@ impl App {
             let label_el: Element<Message> = if editing {
                 text_editor(&self.editors.fields[i].1)
                     .on_action(move |a| Message::FieldLabelEdited(i, a))
-                    .key_binding(detail_keys(5 + i * 2))
+                    .key_binding(editor_keys_basic)
                     .font(CJK).size((self.fs() - 4.0).max(9.0))
                     .padding(4)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -875,7 +851,7 @@ impl App {
             field_row = field_row.push(
                 text_editor(&self.editors.fields[i].2)
                     .on_action(move |a| Message::FieldValueEdited(i, a))
-                    .key_binding(detail_keys(6 + i * 2))
+                    .key_binding(editor_keys_basic)
                     .font(CJK).size(self.fs())
                     .min_height(self.fs() * 1.3 + 16.0)
                     .max_height(self.fs() * 1.3 * 3.0 + 16.0)
@@ -894,12 +870,12 @@ impl App {
     fn tiny_editor<'a>(
         &'a self, content: &'a text_editor::Content,
         on_action: impl Fn(text_editor::Action) -> Message + 'a,
-        width: f32, _placeholder: &str, idx: usize,
+        width: f32, _placeholder: &str,
     ) -> Element<'a, Message> {
         container(
             text_editor(content)
                 .on_action(on_action)
-                .key_binding(detail_keys(idx))
+                .key_binding(editor_keys_basic)
                 .font(CJK).size(self.fs() - 1.0)
                 .padding(6)
                 .style(self.editor_style(true))
