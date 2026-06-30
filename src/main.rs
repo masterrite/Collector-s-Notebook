@@ -294,7 +294,7 @@ enum Message {
     FieldValueEdited(usize, EdAction),
     AddCustomField,
     DeleteCustomField(String),
-    FocusDetail(usize),  // Tab/Shift+Tab: focus a detail editor by tab-order index
+    TabField(usize, bool),  // Tab from detail editor #usize; bool = forward (false = Shift+Tab)
     SaveShortcut,        // Ctrl+S / Cmd+S: save edited fields, stay in edit mode
 
     // search

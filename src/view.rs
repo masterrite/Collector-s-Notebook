@@ -84,13 +84,12 @@ fn detail_id(idx: usize) -> iced::widget::Id {
     iced::widget::Id::from(format!("cn-detail-{idx}"))
 }
 
-/// Builds the key-binding closure for the detail editor at position `idx`,
-/// where `total` is the number of detail editors currently shown. Word ops are
-/// shared; Tab/Shift+Tab move to the next/previous detail editor (wrapping),
-/// emitting a focus-by-id message rather than iced's global focus traversal.
+/// Builds the key-binding closure for the detail editor at position `idx`.
+/// Word ops are shared; Tab/Shift+Tab emit a message carrying this editor's
+/// index and the direction, and `update` resolves the actual target from the
+/// live editor count (so it can't go stale if fields are added/removed).
 fn detail_keys(
     idx: usize,
-    total: usize,
 ) -> impl Fn(text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
     move |kp| {
         use iced::keyboard::key::Named;
@@ -100,17 +99,10 @@ fn detail_keys(
         if let Some(b) = editor_word_binding(&kp) {
             return Some(b);
         }
-        // Tab → next detail field, Shift+Tab → previous, wrapping within the
-        // panel. Overrides text_editor's default Tab-indents-line behavior here.
+        // Tab → next detail field, Shift+Tab → previous. Overrides text_editor's
+        // default Tab-indents-line behavior here.
         if let Key::Named(Named::Tab) = &kp.key {
-            let target = if total == 0 {
-                0
-            } else if kp.modifiers.shift() {
-                (idx + total - 1) % total
-            } else {
-                (idx + 1) % total
-            };
-            return Some(Binding::Custom(Message::FocusDetail(target)));
+            return Some(Binding::Custom(Message::TabField(idx, !kp.modifiers.shift())));
         }
         Binding::from_key_press(kp)
     }
@@ -657,9 +649,6 @@ impl App {
     fn detail_body(&self) -> Element<'_, Message> {
         let p = self.palette;
         let editing = self.is_editing;
-        // Number of detail editors for Tab cycling: name, description, year,
-        // month, day (5) + label/value per custom field (2 each).
-        let detail_total = 5 + self.editors.fields.len() * 2;
 
         // top bar
         let edit_label = if editing { "Save" } else { "Edit" };
@@ -742,7 +731,7 @@ impl App {
             text_editor(&self.editors.name)
                 .on_action(Message::NameEdited)
                 .id(detail_id(0))
-                .key_binding(detail_keys(0, detail_total))
+                .key_binding(detail_keys(0))
                 .font(CJK).size(self.fs() + 1.0)
                 .padding(8)
                 // Name is a single line; it scrolls horizontally past that.
@@ -760,7 +749,7 @@ impl App {
             text_editor(&self.editors.desc)
                 .on_action(Message::DescEdited)
                 .id(detail_id(1))
-                .key_binding(detail_keys(1, detail_total))
+                .key_binding(detail_keys(1))
                 .font(CJK).size(self.fs())
                 // Fixed three-line box. The editor renders at ~1.0x line height
                 // (not the 1.3 the text widget uses), so size off ~1.15x per line
@@ -843,11 +832,11 @@ impl App {
         body = body.push(self.subheader("Date Acquired"));
         if editing {
             body = body.push(container(row![
-                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY", 2, detail_total),
+                self.tiny_editor(&self.editors.year, Message::YearEdited, 70.0, "YYYY", 2),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM", 3, detail_total),
+                self.tiny_editor(&self.editors.month, Message::MonthEdited, 48.0, "MM", 3),
                 text("-").color(p.text_muted),
-                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD", 4, detail_total),
+                self.tiny_editor(&self.editors.day, Message::DayEdited, 48.0, "DD", 4),
             ].spacing(6).align_y(iced::Alignment::Center)).center_x(Fill));
         } else if let Some(it) = self.selected_item() {
             body = body.push(container(self.body(display_date(&it.acquired_date))).center_x(Fill));
@@ -872,7 +861,7 @@ impl App {
                 text_editor(&self.editors.fields[i].1)
                     .on_action(move |a| Message::FieldLabelEdited(i, a))
                     .id(detail_id(5 + i * 2))
-                    .key_binding(detail_keys(5 + i * 2, detail_total))
+                    .key_binding(detail_keys(5 + i * 2))
                     .font(CJK).size((self.fs() - 4.0).max(9.0))
                     .padding(4)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -899,7 +888,7 @@ impl App {
                 text_editor(&self.editors.fields[i].2)
                     .on_action(move |a| Message::FieldValueEdited(i, a))
                     .id(detail_id(6 + i * 2))
-                    .key_binding(detail_keys(6 + i * 2, detail_total))
+                    .key_binding(detail_keys(6 + i * 2))
                     .font(CJK).size(self.fs())
                     .min_height(self.fs() * 1.3 + 16.0)
                     .max_height(self.fs() * 1.3 * 3.0 + 16.0)
@@ -918,13 +907,13 @@ impl App {
     fn tiny_editor<'a>(
         &'a self, content: &'a text_editor::Content,
         on_action: impl Fn(text_editor::Action) -> Message + 'a,
-        width: f32, _placeholder: &str, idx: usize, total: usize,
+        width: f32, _placeholder: &str, idx: usize,
     ) -> Element<'a, Message> {
         container(
             text_editor(content)
                 .on_action(on_action)
                 .id(detail_id(idx))
-                .key_binding(detail_keys(idx, total))
+                .key_binding(detail_keys(idx))
                 .font(CJK).size(self.fs() - 1.0)
                 .padding(6)
                 .style(self.editor_style(true))
