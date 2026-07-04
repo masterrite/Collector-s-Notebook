@@ -1,19 +1,27 @@
 name: Build
-# Build native binaries for Windows, macOS, and Linux.
+# Build Tauri bundles for Windows, macOS, and Linux.
 #
 # Triggers:
 #   - on every push to main / pull request: builds all (CI check)
 #   - on pushing a version tag like v1.0.0: builds all AND attaches
-#     the binaries to a GitHub Release. macOS ships as .dmg.
+#     the bundles to a GitHub Release.
+#
+# Ship vehicles per platform (what `cargo tauri build` produces):
+#   Windows: NSIS installer (*-setup.exe) + the portable exe
+#   macOS:   .dmg (proper .app inside — no hand-rolled Info.plist needed)
+#   Linux:   AppImage (self-contained; a raw binary would need system webkit)
+#
+# Requirements committed to the repo:
+#   - src-tauri/icons/ must contain the full icon set (run `cargo tauri icon`
+#     once locally and commit it) — the macOS/Windows bundlers hard-require it.
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
-  workflow_dispatch:   # allows manual "Run workflow" button in the Actions tab
+  workflow_dispatch:
 
-# Needed so the release job can create a Release and upload assets.
 permissions:
   contents: write
 
@@ -27,20 +35,17 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: collectors-notebook.exe
-            asset: Collectors-Notebook-windows-x86_64.exe
+            asset_installer: Collectors-Notebook-windows-x86_64-setup.exe
+            asset_portable: Collectors-Notebook-windows-x86_64-portable.exe
           - os: macos-latest
-            target: aarch64-apple-darwin       # Apple Silicon (M1+)
-            artifact: collectors-notebook
+            target: aarch64-apple-darwin        # Apple Silicon (M1+)
             asset: Collectors-Notebook-macos-arm64.dmg
           - os: macos-15-intel
-            target: x86_64-apple-darwin         # Intel Macs
-            artifact: collectors-notebook
+            target: x86_64-apple-darwin          # Intel Macs
             asset: Collectors-Notebook-macos-x86_64.dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: collectors-notebook
-            asset: Collectors-Notebook-linux-x86_64
+            asset: Collectors-Notebook-linux-x86_64.AppImage
 
     steps:
       - name: Checkout
@@ -51,105 +56,76 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Cache cargo registry + build output to speed up subsequent runs.
+      # Cache cargo registry + build output. NOTE: target/ lives under
+      # src-tauri now, and the lockfile hashed is src-tauri/Cargo.lock.
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            src-tauri/target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ matrix.target }}-cargo-
 
-      # Linux needs system libraries for the GUI (winit), font rendering,
-      # and the rfd native file dialog (GTK).
+      # Tauri v2 Linux stack: webview + tray/menu/rsvg support. This replaces
+      # the old winit/fontconfig list entirely.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libgtk-3-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev \
-            libfontconfig1-dev \
-            libfreetype6-dev
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl wget file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+      # Prebuilt CLI in seconds (compiling tauri-cli would cost ~10 minutes).
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
 
-      # -- Stage: Linux (raw binary) --
-      - name: Stage binary (Linux)
+      - name: Install tauri-cli
+        run: cargo binstall tauri-cli --locked --no-confirm
+
+      - name: Build bundles
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      # -- Stage: rename Tauri's versioned bundle names to stable asset names --
+      - name: Stage (Linux AppImage)
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "dist/${{ matrix.asset }}"
+          cp src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage "dist/${{ matrix.asset }}"
           chmod +x "dist/${{ matrix.asset }}"
 
-      # -- Stage: Windows (raw exe) --
-      - name: Stage binary (Windows)
+      - name: Stage (macOS dmg)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg "dist/${{ matrix.asset }}"
+
+      - name: Stage (Windows installer + portable exe)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "dist/${{ matrix.asset }}"
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" "dist/${{ matrix.asset_installer }}"
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/collectors-notebook.exe" "dist/${{ matrix.asset_portable }}"
 
-      # -- Stage: macOS (.app bundle inside a .dmg) --
-      - name: Stage binary (macOS dmg)
-        if: runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          APP="Collectors-Notebook.app"
-          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
-          cp "assets/icons/Collectors-Notebook.icns" "${APP}/Contents/Resources/Collectors-Notebook.icns"
-
-          cat > "${APP}/Contents/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleIconFile</key>         <string>Collectors-Notebook</string>
-            <key>CFBundleName</key>             <string>Collector's Notebook</string>
-            <key>CFBundleDisplayName</key>      <string>Collector's Notebook</string>
-            <key>CFBundleExecutable</key>       <string>${{ matrix.artifact }}</string>
-            <key>CFBundleIdentifier</key>       <string>com.example.collectors-notebook</string>
-            <key>CFBundlePackageType</key>      <string>APPL</string>
-            <key>LSMinimumSystemVersion</key>   <string>10.13</string>
-            <key>NSHighResolutionCapable</key>  <true/>
-          </dict>
-          </plist>
-          PLIST
-
-          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "${APP}/Contents/MacOS/${{ matrix.artifact }}"
-          chmod +x "${APP}/Contents/MacOS/${{ matrix.artifact }}"
-
-          # Ad-hoc sign (not notarization -- users still right-click > Open first time).
-          codesign --force --deep --sign - "${APP}" || true
-
-          mkdir -p dist
-          # Simple, dependency-free dmg via hdiutil.
-          STAGE="$(mktemp -d)"
-          cp -R "${APP}" "${STAGE}/"
-          ln -s /Applications "${STAGE}/Applications"
-          hdiutil create -volname "Collector's Notebook" \
-            -srcfolder "${STAGE}" -ov -format UDZO \
-            "dist/${{ matrix.asset }}"
-
-      # Upload each platform's artifact (downloadable from the run summary).
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: bundles-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
 
-      # On a version tag, attach the artifact to a GitHub Release.
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset }}
+          files: dist/*
           fail_on_unmatched_files: true
