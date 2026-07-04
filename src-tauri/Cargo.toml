@@ -1,0 +1,25 @@
+[package]
+name = "collectors-notebook"
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Collector's Notebook"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+rfd = "0.15"
+image = "0.25"
+base64 = "0.22"
+
+[profile.release]
+# opt-level = "z"
+# lto = true
+# strip = true
+# codegen-units = 1
