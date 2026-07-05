@@ -68,19 +68,25 @@ pub struct AppData {
 // LABEL only, not in numbering. This removes the old Slint(0..4)/Rust scheme
 // mismatch entirely.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Serializes as kebab-case ("added", "name-asc", …). Each variant also accepts
+// its legacy PascalCase spelling on read via #[serde(alias)], so existing
+// settings.json files keep the user's chosen sort instead of resetting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum SortMode {
+    #[serde(alias = "Added")]
+    #[default]
     Added,    // insertion order
+    #[serde(alias = "NameAsc")]
     NameAsc,
+    #[serde(alias = "NameDesc")]
     NameDesc,
     /// collections: fewest items · items: oldest acquired
+    #[serde(alias = "LowOrOld")]
     LowOrOld,
     /// collections: most items · items: newest acquired
+    #[serde(alias = "HighOrNew")]
     HighOrNew,
-}
-
-impl Default for SortMode {
-    fn default() -> Self { SortMode::Added }
 }
 
 
@@ -88,17 +94,21 @@ impl Default for SortMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default = "default_dark_mode")]
     pub dark_mode: bool,
+    #[serde(default = "default_accent_hex")]
     pub accent_hex: String,
-    /// Split ratios for the resizable pane_grid (each in 0..1). `left_ratio` is
-    /// the left pane's share of the whole width; `mid_ratio` is the middle
-    /// pane's share of the REMAINING width after the left pane (this matches
-    /// pane_grid's nested-split model: outer split = left | rest, inner split =
-    /// mid | right).
+    /// Split ratios for the resizable panes (each a fraction of the WHOLE
+    /// window width, 0..1). `left_ratio` is the left pane's share of the whole
+    /// width; `mid_ratio` is the middle pane's share of the whole width. The
+    /// right pane takes the remainder (1 - left - mid). This matches the CSS
+    /// flexbox layout in ui/app.js, where each pane is sized as a percentage of
+    /// the container. (The earlier pane_grid nested-split meaning is gone.)
     #[serde(default = "default_left_ratio")]
     pub left_ratio: f32,
     #[serde(default = "default_mid_ratio")]
     pub mid_ratio: f32,
+    #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default)]
     pub coll_sort: SortMode,
@@ -106,19 +116,22 @@ pub struct Settings {
     pub item_sort: SortMode,
 }
 
+pub fn default_dark_mode() -> bool { true }
+pub fn default_accent_hex() -> String { "#4f8ef7".into() }
+pub fn default_font_size() -> f32 { 15.0 }
 pub fn default_left_ratio() -> f32 { 0.25 }
-// Mid pane's ratio is its share of the space RIGHT of the left pane. To make
-// the middle pane ~25% of the whole window when left is 25%: 0.25 / 0.75 = 0.333.
-pub fn default_mid_ratio() -> f32 { 0.333 }
+// Mid pane is a fraction of the WHOLE window (not the remainder), matching the
+// CSS layout. Default ~25% of the window.
+pub fn default_mid_ratio() -> f32 { 0.25 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            dark_mode: true,
-            accent_hex: "#4f8ef7".into(),
+            dark_mode: default_dark_mode(),
+            accent_hex: default_accent_hex(),
             left_ratio: default_left_ratio(),
             mid_ratio: default_mid_ratio(),
-            font_size: 15.0,
+            font_size: default_font_size(),
             coll_sort: SortMode::Added,
             item_sort: SortMode::Added,
         }
@@ -170,6 +183,7 @@ pub fn load_data_reporting() -> (AppData, Option<PathBuf>) {
     };
     // Migrate any legacy absolute photo paths to bare filenames so the data and
     // photos/ folder are portable across machines and user accounts.
+    let mut migrated = false;
     for item in &mut data.items {
         for p in &mut item.photos {
             if let Some(name) = std::path::Path::new(p)
@@ -178,6 +192,7 @@ pub fn load_data_reporting() -> (AppData, Option<PathBuf>) {
             {
                 if name != p {
                     *p = name.to_string();
+                    migrated = true;
                 }
             }
         }
@@ -190,10 +205,20 @@ pub fn load_data_reporting() -> (AppData, Option<PathBuf>) {
         data.collections.iter().any(|c| !seen.insert(c.order))
             && data.collections.len() > 1
     };
-    if needs_order || data.collections.iter().all(|c| c.order == 0) {
+    if needs_order || (data.collections.iter().all(|c| c.order == 0) && !data.collections.is_empty()) {
         for (i, c) in data.collections.iter_mut().enumerate() {
-            c.order = i as u64;
+            let ord = i as u64;
+            if c.order != ord {
+                c.order = ord;
+                migrated = true;
+            }
         }
+    }
+    // Persist the migration once, so it doesn't re-run every launch. Only when
+    // the data actually changed AND it loaded cleanly (never overwrite on the
+    // corruption path — we must preserve the salvageable original).
+    if migrated && corrupt_backup.is_none() {
+        save_data(&data);
     }
     (data, corrupt_backup)
 }
@@ -208,7 +233,8 @@ pub fn save_data(data: &AppData) {
 /// the old file or the new file intact — never a truncated, unparseable one.
 /// (rename is atomic when source and destination are on the same filesystem,
 /// which they are here since the temp file sits in the same directory.)
-fn atomic_write(path: &std::path::Path, bytes: &[u8]) {
+/// Returns true only if the destination now holds the new bytes.
+pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> bool {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
     // Scope the file handle so it's closed (flushed) before the rename.
@@ -222,9 +248,12 @@ fn atomic_write(path: &std::path::Path, bytes: &[u8]) {
         // If the rename fails, drop the temp file rather than leaving litter.
         if std::fs::rename(&tmp, path).is_err() {
             std::fs::remove_file(&tmp).ok();
+            return false;
         }
+        true
     } else {
         std::fs::remove_file(&tmp).ok();
+        false
     }
 }
 
@@ -257,10 +286,23 @@ pub fn load_settings() -> Settings {
         },
         Err(_) => Settings::default(),
     };
-    // Clamp pane ratios into the allowed range. This also self-heals older
-    // settings.json files that stored wider ratios before the 0.4 cap existed.
+    // Clamp pane ratios into the allowed range. Both are now fractions of the
+    // whole window, so we additionally guarantee the right pane keeps at least
+    // ~15% by capping left+mid. This also self-heals older settings.json files
+    // that stored the previous "share of the remainder" mid_ratio (e.g. 0.333),
+    // which would otherwise render the middle pane too wide.
     s.left_ratio = s.left_ratio.clamp(0.08, 0.33);
-    s.mid_ratio = s.mid_ratio.clamp(0.12, 0.7);
+    s.mid_ratio = s.mid_ratio.clamp(0.12, 0.6);
+    // Guard NaN/inf coming from a bad payload before the sum check.
+    if !s.left_ratio.is_finite() { s.left_ratio = default_left_ratio(); }
+    if !s.mid_ratio.is_finite() { s.mid_ratio = default_mid_ratio(); }
+    if s.left_ratio + s.mid_ratio > 0.85 {
+        s.mid_ratio = (0.85 - s.left_ratio).max(0.12);
+    }
+    if !s.font_size.is_finite() {
+        s.font_size = default_font_size();
+    }
+    s.font_size = s.font_size.clamp(10.0, 28.0);
     s
 }
 pub fn save_settings(s: &Settings) {
@@ -278,11 +320,11 @@ pub fn item_count(data: &AppData, coll_id: &str) -> usize {
 /// Sort the underlying collections vec so stable indices stay valid.
 pub fn sort_collections(data: &mut AppData, mode: SortMode) {
     match mode {
-        SortMode::Added => data.collections.sort_by(|a, b| a.order.cmp(&b.order)),
+        SortMode::Added => data.collections.sort_by_key(|a| a.order),
         SortMode::NameAsc => data.collections
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            .sort_by_key(|a| a.name.to_lowercase()),
         SortMode::NameDesc => data.collections
-            .sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase())),
+            .sort_by_key(|b| std::cmp::Reverse(b.name.to_lowercase())),
         SortMode::LowOrOld | SortMode::HighOrNew => {
             let counts: std::collections::HashMap<String, usize> = data
                 .collections.iter()

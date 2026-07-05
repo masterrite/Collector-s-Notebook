@@ -84,7 +84,7 @@ fn list_backups() -> Vec<BackupInfo> {
             }
         }
     }
-    out.sort_by(|a, b| b.stamp_secs.cmp(&a.stamp_secs));
+    out.sort_by_key(|b| std::cmp::Reverse(b.stamp_secs));
     out
 }
 
@@ -108,7 +108,11 @@ fn restore_backup(file_name: String) -> Option<AppData> {
     let text = std::fs::read_to_string(&src).ok()?;
     let parsed: AppData = serde_json::from_str(&text).ok()?;
     backup_data_file(); // safety snapshot of what's being replaced
-    std::fs::write(data_path(), text).ok()?;
+    // Atomic swap: a crash mid-restore leaves the old data.json intact rather
+    // than a truncated, unparseable file.
+    if !model::atomic_write(&data_path(), text.as_bytes()) {
+        return None;
+    }
     Some(parsed)
 }
 
@@ -162,10 +166,8 @@ fn mirror_new(src: &std::path::Path, dst: &std::path::Path) -> u64 {
             }
             if let Some(name) = p.file_name() {
                 let target = dst.join(name);
-                if !target.exists() {
-                    if std::fs::copy(&p, &target).is_ok() {
-                        copied += 1;
-                    }
+                if !target.exists() && std::fs::copy(&p, &target).is_ok() {
+                    copied += 1;
                 }
             }
         }
@@ -217,11 +219,12 @@ fn restore_missing_photos(referenced: Vec<String>) -> u64 {
 /// Archive files not referenced by any current item get moved to
 /// photo-archive/_deleted/ (not erased) if they're not already there. Called
 /// before reporting status so `orphaned`/`deleted_pending` are meaningful.
-fn shunt_orphans(referenced: &std::collections::HashSet<String>) {
+fn shunt_orphans(referenced: &std::collections::HashSet<String>) -> u64 {
     let arch = photo_archive_dir();
     let ap = arch.join("photos");
     let del = arch.join("_deleted");
     std::fs::create_dir_all(&del).ok();
+    let mut moved = 0;
     if let Ok(rd) = std::fs::read_dir(&ap) {
         for e in rd.flatten() {
             let p = e.path();
@@ -229,25 +232,58 @@ fn shunt_orphans(referenced: &std::collections::HashSet<String>) {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if !referenced.contains(&name) {
-                std::fs::rename(&p, del.join(&name)).ok();
+            if !referenced.contains(&name)
+                && std::fs::rename(&p, del.join(&name)).is_ok()
+            {
+                moved += 1;
             }
         }
     }
+    moved
 }
 
+/// Count archived photos not referenced by any current item WITHOUT moving
+/// anything — a pure read used by the status query.
+fn count_orphans(referenced: &std::collections::HashSet<String>) -> u64 {
+    let ap = photo_archive_dir().join("photos");
+    let mut orphaned = 0;
+    if let Ok(rd) = std::fs::read_dir(&ap) {
+        for e in rd.flatten() {
+            if !e.path().is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if !referenced.contains(&name) {
+                orphaned += 1;
+            }
+        }
+    }
+    orphaned
+}
+
+/// Explicitly move archived photos not referenced by any current item into
+/// _deleted/ (reversible — they aren't erased until purge). Returns how many
+/// were moved. This is the mutating counterpart to `photo_archive_status`,
+/// which is now a pure read.
+#[tauri::command]
+fn shunt_orphan_photos(referenced: Vec<String>) -> u64 {
+    let refset: std::collections::HashSet<String> = referenced.into_iter().collect();
+    shunt_orphans(&refset)
+}
+
+/// Pure read: never moves or deletes files. `orphaned` reports how many
+/// archived photos are no longer referenced; call `shunt_orphan_photos` to act
+/// on them.
 #[tauri::command]
 fn photo_archive_status(referenced: Vec<String>) -> PhotoArchiveStatus {
     let refset: std::collections::HashSet<String> = referenced.into_iter().collect();
     let arch = photo_archive_dir();
-    shunt_orphans(&refset);
     let del = arch.join("_deleted");
     PhotoArchiveStatus {
         archived_photos: dir_file_count(&arch.join("photos")),
         archived_thumbs: dir_file_count(&arch.join("thumbnails")),
         archive_bytes: dir_size(&arch),
-        // after shunting, orphans in photos/ are zero; report what's pending
-        orphaned: 0,
+        orphaned: count_orphans(&refset),
         deleted_pending: dir_file_count(&del),
     }
 }
@@ -258,8 +294,14 @@ fn photo_archive_status(referenced: Vec<String>) -> PhotoArchiveStatus {
 #[tauri::command]
 fn purge_deleted_photos(days: u64) -> u64 {
     let del = photo_archive_dir().join("_deleted");
+    // Clamp to a sane range and use saturating math so a huge `days` can't
+    // overflow the multiply (which panics in debug) or silently wrap. A large
+    // value simply yields a very old cutoff (UNIX_EPOCH), purging nothing,
+    // which is the safe direction.
+    let days = days.min(36_500); // ~100 years is plenty
+    let secs = days.saturating_mul(86_400);
     let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_secs(days * 86400))
+        .checked_sub(std::time::Duration::from_secs(secs))
         .unwrap_or(std::time::UNIX_EPOCH);
     let mut purged = 0;
     if let Ok(rd) = std::fs::read_dir(&del) {
@@ -341,6 +383,14 @@ fn photo_b64(name: String, max_px: u32) -> Option<(String, u32, u32)> {
     image_util::photo_data_url(&name, max_px)
 }
 
+/// Raw JPEG bytes + dimensions for the lightbox. The UI turns the bytes into a
+/// Blob/object URL it can revoke, so photo memory is freed deterministically
+/// (see the LRU cache in ui/app.js) rather than accumulating as data URLs.
+#[tauri::command]
+fn photo_bytes(name: String, max_px: u32) -> Option<(Vec<u8>, u32, u32)> {
+    image_util::photo_bytes(&name, max_px)
+}
+
 /// Native multi-file picker → copies into photos_dir + thumbnails → returns
 /// the new bare filenames. (Windows: rfd off the main thread is fine.)
 #[tauri::command]
@@ -411,6 +461,7 @@ fn main() {
             sort_collections_cmd,
             thumb_b64,
             photo_b64,
+            photo_bytes,
             pick_photos,
             copy_photo,
             delete_photo,
@@ -423,6 +474,7 @@ fn main() {
             backup_photos,
             restore_missing_photos,
             photo_archive_status,
+            shunt_orphan_photos,
             purge_deleted_photos,
             open_photo_archive
         ])
