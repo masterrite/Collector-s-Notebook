@@ -1133,7 +1133,11 @@ function openSettings() {
   logo.src = "logo.png";
   logo.onerror = () => logo.remove();
   footer.appendChild(logo);
-  footer.appendChild(el("div", "muted", "Version 3.0.0 · UI v3.1"));
+  const verEl = el("div", "muted", "Version …");
+  footer.appendChild(verEl);
+  invoke("app_version")
+    .then((v) => { verEl.textContent = `Version ${v}`; })
+    .catch(() => { verEl.textContent = ""; verEl.remove(); });
 
   scrim = modal([
     modalHead("Settings", () => scrim),
