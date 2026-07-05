@@ -16,8 +16,8 @@ The traveler's notebook is basically a piece of leather wrapped around papers. T
 ---
 
 <p align="center">
-    <img height="512" alt="image" src="https://github.com/user-attachments/assets/8e7048e2-5ad8-4381-9eda-c7522c2793d2" />
-    <img height="512" alt="image" src="https://github.com/user-attachments/assets/833db2c6-6db8-4dbf-9f47-1ad492f3c80e" />
+    <img height="512" alt="image" src="https://github.com/user-attachments/assets/ac358239-fe00-4789-a231-975f4e4a7659" />
+    <img height="512" alt="image" src="https://github.com/user-attachments/assets/3f1ffeef-92d9-433d-91b4-175383908902" />
     <br>
     <sub>Click to enlarge</sub>
 </p>
