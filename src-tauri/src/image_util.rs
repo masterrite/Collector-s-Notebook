@@ -23,12 +23,16 @@ pub fn resolve_photo(stored: &str) -> PathBuf {
     photos_dir().join(name)
 }
 
+/// Thumbnail filename is derived from the FULL stored filename (not just the
+/// stem) so two photos that share a stem but differ by extension — e.g.
+/// "abc.png" and "abc.webp" arriving via an imported dataset — can't collide to
+/// the same cached thumbnail. The thumbnail itself is always JPEG.
 pub fn thumb_path_for(stored: &str) -> PathBuf {
-    let stem = Path::new(stored)
-        .file_stem()
+    let name = Path::new(stored)
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("thumb");
-    thumbs_dir().join(format!("{stem}.jpg"))
+    thumbs_dir().join(format!("{name}.jpg"))
 }
 
 pub fn generate_thumbnail(stored: &str) {
@@ -66,7 +70,13 @@ pub fn copy_photo_file(stored: &str) -> Option<String> {
     let name = format!("{}.{}", Uuid::new_v4(), ext);
     let dest = photos_dir().join(&name);
     std::fs::copy(&src, &dest).ok()?;
-    generate_thumbnail(&name);
+    // Reuse the source's cached thumbnail if it exists (cheap file copy) instead
+    // of re-decoding and re-encoding the full image; fall back to generation.
+    let src_thumb = thumb_path_for(stored);
+    let dst_thumb = thumb_path_for(&name);
+    if !src_thumb.exists() || std::fs::copy(&src_thumb, &dst_thumb).is_err() {
+        generate_thumbnail(&name);
+    }
     Some(name)
 }
 
@@ -87,8 +97,10 @@ fn jpeg_data_url(img: &image::DynamicImage) -> Option<String> {
     Some(format!("data:image/jpeg;base64,{}", B64.encode(buf)))
 }
 
-/// data: URL of the cached thumbnail. The webview crops via CSS object-fit,
-/// so no square-cropping is needed here — just the small cached image.
+/// data: URL of the cached thumbnail. Fast path: the on-disk thumbnail is
+/// already a small JPEG, so read its bytes and base64 them directly — no image
+/// decode/re-encode. Only the fallback (thumbnail somehow missing after a
+/// generate attempt, or reading the source instead) touches the `image` crate.
 pub fn thumb_data_url(stored: &str) -> Option<String> {
     if stored.is_empty() {
         return None;
@@ -97,10 +109,14 @@ pub fn thumb_data_url(stored: &str) -> Option<String> {
     if !thumb.exists() {
         generate_thumbnail(stored);
     }
-    let img = std::fs::read(&thumb)
-        .ok()
-        .and_then(|b| image::load_from_memory(&b).ok())
-        .or_else(|| image::open(resolve_photo(stored)).ok())?;
+    // Fast path: raw JPEG bytes straight to base64.
+    if let Ok(bytes) = std::fs::read(&thumb) {
+        if !bytes.is_empty() {
+            return Some(format!("data:image/jpeg;base64,{}", B64.encode(bytes)));
+        }
+    }
+    // Fallback: thumbnail unreadable — decode the source and encode a data URL.
+    let img = image::open(resolve_photo(stored)).ok()?;
     jpeg_data_url(&img)
 }
 
@@ -110,12 +126,40 @@ pub fn photo_data_url(stored: &str, max_px: u32) -> Option<(String, u32, u32)> {
     if stored.is_empty() {
         return None;
     }
+    // No artificial resolution cap: the lightbox zooms for detail inspection,
+    // so the full image must be delivered. Memory is managed on the UI side by
+    // revoking the image when the lightbox closes (see ui/app.js), rather than
+    // by shrinking the picture here. `max_px` still lets a caller opt into a
+    // smaller delivery (e.g. a preview), but 0 means "no downscaling".
     let img = image::open(resolve_photo(stored)).ok()?;
-    let img = if img.width().max(img.height()) > max_px {
+    let img = if max_px > 0 && img.width().max(img.height()) > max_px {
         img.resize(max_px, max_px, image::imageops::FilterType::Triangle)
     } else {
         img
     };
     let url = jpeg_data_url(&img)?;
     Some((url, img.width(), img.height()))
+}
+
+/// Raw JPEG bytes of the photo (optionally downscaled to `max_px` on the
+/// longest side; 0 = full resolution), plus its delivered pixel dimensions.
+/// Unlike `photo_data_url`, this returns the bytes themselves rather than a
+/// base64 data: URL. The UI wraps them in a Blob + object URL, which it can
+/// revoke to free memory deterministically instead of leaving a large,
+/// non-revocable data URL string live in the DOM/heap for the whole session.
+pub fn photo_bytes(stored: &str, max_px: u32) -> Option<(Vec<u8>, u32, u32)> {
+    if stored.is_empty() {
+        return None;
+    }
+    let img = image::open(resolve_photo(stored)).ok()?;
+    let img = if max_px > 0 && img.width().max(img.height()) > max_px {
+        img.resize(max_px, max_px, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let mut buf = Vec::new();
+    img.to_rgb8()
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+        .ok()?;
+    Some((buf, img.width(), img.height()))
 }
