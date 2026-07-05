@@ -112,6 +112,196 @@ fn restore_backup(file_name: String) -> Option<AppData> {
     Some(parsed)
 }
 
+#[derive(Serialize)]
+struct PhotoArchiveStatus {
+    archived_photos: u64,
+    archived_thumbs: u64,
+    archive_bytes: u64,
+    orphaned: u64,          // in the archive but not referenced by any current item
+    deleted_pending: u64,   // sitting in _deleted/, awaiting purge
+}
+
+fn photo_archive_dir() -> std::path::PathBuf {
+    app_dir().join("photo-archive")
+}
+
+fn dir_file_count(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().filter(|e| e.path().is_file()).count() as u64)
+        .unwrap_or(0)
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() {
+                total += e.metadata().map(|m| m.len()).unwrap_or(0);
+            } else if p.is_dir() {
+                total += dir_size(&p);
+            }
+        }
+    }
+    total
+}
+
+/// Incremental ADDITIVE mirror: copy any file in src not already present in
+/// dst (same name = same bytes, since photo filenames are content-unique
+/// UUIDs). Never deletes from dst. Returns how many new files were copied.
+fn mirror_new(src: &std::path::Path, dst: &std::path::Path) -> u64 {
+    if std::fs::create_dir_all(dst).is_err() {
+        return 0;
+    }
+    let mut copied = 0;
+    if let Ok(rd) = std::fs::read_dir(src) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            if let Some(name) = p.file_name() {
+                let target = dst.join(name);
+                if !target.exists() {
+                    if std::fs::copy(&p, &target).is_ok() {
+                        copied += 1;
+                    }
+                }
+            }
+        }
+    }
+    copied
+}
+
+/// Back up photos + thumbnails incrementally (additive; deletions in the app
+/// never remove archived copies). Returns how many new files were archived.
+#[tauri::command]
+fn backup_photos() -> u64 {
+    let arch = photo_archive_dir();
+    let a = mirror_new(&photos_dir(), &arch.join("photos"));
+    let b = mirror_new(&thumbs_dir(), &arch.join("thumbnails"));
+    a + b
+}
+
+/// Restore photos referenced by current data that are MISSING from the live
+/// photos folder, pulling them back from the archive; regenerate any absent
+/// thumbnails. `referenced` is the set of photo filenames the UI knows about.
+/// Returns how many photos were restored.
+#[tauri::command]
+fn restore_missing_photos(referenced: Vec<String>) -> u64 {
+    let arch_photos = photo_archive_dir().join("photos");
+    let live = photos_dir();
+    std::fs::create_dir_all(&live).ok();
+    let mut restored = 0;
+    for name in referenced {
+        if name.trim().is_empty() {
+            continue;
+        }
+        let live_path = live.join(&name);
+        if live_path.exists() {
+            // present, but make sure a thumbnail exists too
+            if !image_util::thumb_path_for(&name).exists() {
+                image_util::generate_thumbnail(&name);
+            }
+            continue;
+        }
+        let arch_path = arch_photos.join(&name);
+        if arch_path.exists() && std::fs::copy(&arch_path, &live_path).is_ok() {
+            image_util::generate_thumbnail(&name);
+            restored += 1;
+        }
+    }
+    restored
+}
+
+/// Archive files not referenced by any current item get moved to
+/// photo-archive/_deleted/ (not erased) if they're not already there. Called
+/// before reporting status so `orphaned`/`deleted_pending` are meaningful.
+fn shunt_orphans(referenced: &std::collections::HashSet<String>) {
+    let arch = photo_archive_dir();
+    let ap = arch.join("photos");
+    let del = arch.join("_deleted");
+    std::fs::create_dir_all(&del).ok();
+    if let Ok(rd) = std::fs::read_dir(&ap) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if !referenced.contains(&name) {
+                std::fs::rename(&p, del.join(&name)).ok();
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn photo_archive_status(referenced: Vec<String>) -> PhotoArchiveStatus {
+    let refset: std::collections::HashSet<String> = referenced.into_iter().collect();
+    let arch = photo_archive_dir();
+    shunt_orphans(&refset);
+    let del = arch.join("_deleted");
+    PhotoArchiveStatus {
+        archived_photos: dir_file_count(&arch.join("photos")),
+        archived_thumbs: dir_file_count(&arch.join("thumbnails")),
+        archive_bytes: dir_size(&arch),
+        // after shunting, orphans in photos/ are zero; report what's pending
+        orphaned: 0,
+        deleted_pending: dir_file_count(&del),
+    }
+}
+
+/// Permanently delete archived photos in _deleted/ older than `days` days.
+/// Returns how many were purged. This is the ONLY destructive archive op and
+/// is always user-initiated.
+#[tauri::command]
+fn purge_deleted_photos(days: u64) -> u64 {
+    let del = photo_archive_dir().join("_deleted");
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(days * 86400))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut purged = 0;
+    if let Ok(rd) = std::fs::read_dir(&del) {
+        for e in rd.flatten() {
+            let modified = e.metadata().and_then(|m| m.modified()).ok();
+            if let Some(mt) = modified {
+                if mt < cutoff {
+                    // remove the photo and any matching thumbnail copy
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if std::fs::remove_file(e.path()).is_ok() {
+                        purged += 1;
+                    }
+                    let thumb = photo_archive_dir()
+                        .join("thumbnails")
+                        .join(std::path::Path::new(&name)
+                            .with_extension("jpg")
+                            .file_name()
+                            .unwrap_or_default());
+                    std::fs::remove_file(thumb).ok();
+                }
+            }
+        }
+    }
+    purged
+}
+
+fn open_archive_folder() {
+    let dir = photo_archive_dir();
+    std::fs::create_dir_all(&dir).ok();
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("explorer").arg(&dir).spawn().ok(); }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(&dir).spawn().ok(); }
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(&dir).spawn().ok(); }
+}
+
+#[tauri::command]
+fn open_photo_archive() {
+    open_archive_folder();
+}
+
 #[tauri::command]
 fn load_all() -> LoadAll {
     backup_data_file();
@@ -229,7 +419,12 @@ fn main() {
             open_data_folder,
             list_backups,
             backup_now,
-            restore_backup
+            restore_backup,
+            backup_photos,
+            restore_missing_photos,
+            photo_archive_status,
+            purge_deleted_photos,
+            open_photo_archive
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");
