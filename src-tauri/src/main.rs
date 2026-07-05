@@ -452,6 +452,14 @@ fn open_data_folder() {
     }
 }
 
+/// The app version, baked in at compile time from Cargo.toml's `version` field.
+/// The UI shows this in Settings, so the footer always matches the crate version
+/// with no second place to keep in sync.
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -468,6 +476,7 @@ fn main() {
             export_data_cmd,
             import_data_cmd,
             open_data_folder,
+            app_version,
             list_backups,
             backup_now,
             restore_backup,
