@@ -1168,7 +1168,39 @@ function openSettings() {
 }
 
 // ─── lightbox (original look: photo on dark scrim, side arrows) ────────────
-const photoCache = new Map(); // name -> data URL (2048px capped)
+// Full-resolution photos are delivered as raw JPEG bytes and wrapped in object
+// URLs (revocable), cached in a small LRU. Capping the cache bounds memory no
+// matter how many photos are opened; evicting or closing revokes the URL so the
+// browser frees the decoded image immediately instead of leaving it to GC.
+const LB_CACHE_MAX = 5;
+const photoCache = new Map(); // name -> object URL (insertion order = LRU order)
+
+function lbCacheGet(name) {
+  if (!photoCache.has(name)) return undefined;
+  // touch: move to most-recently-used (re-insert at the end)
+  const url = photoCache.get(name);
+  photoCache.delete(name);
+  photoCache.set(name, url);
+  return url;
+}
+function lbCachePut(name, url) {
+  if (photoCache.has(name)) {
+    URL.revokeObjectURL(photoCache.get(name));
+    photoCache.delete(name);
+  }
+  photoCache.set(name, url);
+  // evict least-recently-used until within cap
+  while (photoCache.size > LB_CACHE_MAX) {
+    const oldest = photoCache.keys().next().value;
+    URL.revokeObjectURL(photoCache.get(oldest));
+    photoCache.delete(oldest);
+  }
+}
+function lbCacheClear() {
+  for (const url of photoCache.values()) URL.revokeObjectURL(url);
+  photoCache.clear();
+}
+
 async function openLightbox(idx) {
   const it = selectedItem();
   if (!it || !it.photos.length) return;
@@ -1193,9 +1225,26 @@ async function openLightbox(idx) {
 
   stage.addEventListener("wheel", (e) => {
     e.preventDefault();
-    const z = S.lightbox.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15);
-    S.lightbox.zoom = Math.min(6, Math.max(1, z));
-    if (S.lightbox.zoom === 1) { S.lightbox.panX = 0; S.lightbox.panY = 0; }
+    const prev = S.lightbox.zoom;
+    const next = Math.min(6, Math.max(1, prev * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    if (next === prev) return;
+    if (next === 1) {
+      // fully zoomed out: recenter
+      S.lightbox.zoom = 1; S.lightbox.panX = 0; S.lightbox.panY = 0;
+      requestAnimationFrame(applyLbTransform);
+      return;
+    }
+    // Anchor the zoom on the cursor: keep the image point under the pointer
+    // fixed. Cursor position is measured relative to the stage center, since
+    // the transform (translate then scale) is applied about that center.
+    const rect = stage.getBoundingClientRect();
+    const cx = e.clientX - (rect.left + rect.width / 2);
+    const cy = e.clientY - (rect.top + rect.height / 2);
+    const f = next / prev;
+    // pan' = f*pan + cursor*(1 - f)
+    S.lightbox.panX = f * S.lightbox.panX + cx * (1 - f);
+    S.lightbox.panY = f * S.lightbox.panY + cy * (1 - f);
+    S.lightbox.zoom = next;
     requestAnimationFrame(applyLbTransform);
   }, { passive: false });
   let panning = false, px = 0, py = 0;
@@ -1224,17 +1273,26 @@ async function loadLightboxPhoto() {
   const shown = S.lightbox.index;
   const im = $("lb-img");
   if (!im) return;
-  // instant: show the cached thumbnail while the full image arrives
-  if (photoCache.has(name)) im.src = photoCache.get(name);
+  // instant: show a cached full image if we have one, else the thumbnail
+  const cached = lbCacheGet(name);
+  if (cached) im.src = cached;
   else if (thumbCache.has(name)) im.src = thumbCache.get(name);
   const c = $("lb-counter");
   if (c) c.textContent = `${S.lightbox.index + 1} / ${S.lightbox.count}`;
-  if (!photoCache.has(name)) {
-    const res = await invoke("photo_b64", { name, maxPx: 2048 });
+  if (!cached) {
+    // full resolution (maxPx: 0) as raw JPEG bytes → Blob → revocable object URL
+    const res = await invoke("photo_bytes", { name, maxPx: 0 });
     if (res) {
-      photoCache.set(name, res[0]);
+      // If the lightbox closed while this was in flight, don't repopulate the
+      // just-cleared cache — revoke immediately and bail.
+      if (!S.lightbox.open) return;
+      const bytes = res[0] instanceof Uint8Array ? res[0] : new Uint8Array(res[0]);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
+      lbCachePut(name, url);
       // only swap in if the user hasn't already stepped away
-      if (S.lightbox.open && S.lightbox.index === shown && $("lb-img")) $("lb-img").src = res[0];
+      if (S.lightbox.open && S.lightbox.index === shown && $("lb-img")) {
+        $("lb-img").src = url;
+      }
     }
   }
 }
@@ -1247,6 +1305,9 @@ function lightboxStep(d) {
 function closeLightbox() {
   S.lightbox.open = false;
   $("lightbox")?.remove();
+  // Free every decoded photo immediately — revoke all object URLs rather than
+  // leaving them (and their backing bitmaps) live until GC eventually runs.
+  lbCacheClear();
 }
 
 // ─── global events ───────────────────────────────────────────────────────────
