@@ -918,6 +918,18 @@ function openTemplatePicker() {
   };
   scrim = modal([modalHead("Templates", () => scrim), ...rows, saveBtn], { width: 380 });
 }
+function allReferencedPhotos() {
+  const set = new Set();
+  for (const it of S.data.items) for (const p of it.photos) if (p && p.trim()) set.add(p);
+  return [...set];
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
+}
+
 async function openBackups() {
   let scrim;
   const rows = [];
@@ -927,21 +939,80 @@ async function openBackups() {
     "launch; the newest 5 are kept. Photos are not part of snapshots. " +
     "A backup is made before every restore, so the restore can be reverted, as well."));
   const now = el("button", "action-row", "Back up now");
-  // Guard against rapid clicks: each press is a disk copy + two IPC round
-  // trips + a full panel rebuild — stacking those made the button feel laggy.
-  // One in flight at a time; the button visibly disables while working.
   let busy = false;
   now.onclick = async () => {
     if (busy) return;
-    busy = true;
-    now.disabled = true;
-    now.style.opacity = "0.6";
+    busy = true; now.disabled = true; now.style.opacity = "0.6";
     const ok = await invoke("backup_now");
     scrim.remove();
     if (ok) openBackups();
     else openNotice("Backup", "Backup failed — is the data folder writable?");
   };
   rows.push(now);
+
+  // ── Photos section: incremental additive mirror of photos + thumbnails ──
+  rows.push(el("div", "separator"));
+  rows.push(sub("Photos"));
+  const status = await invoke("photo_archive_status", { referenced: allReferencedPhotos() });
+  const info = el("div", "muted",
+    `Archive: ${status.archived_photos} photo(s), ${fmtBytes(status.archive_bytes)}` +
+    (status.deleted_pending ? ` · ${status.deleted_pending} deleted photo(s) retained` : ""));
+  rows.push(info);
+  rows.push(el("div", "muted",
+    "Photos are mirrored to the archive and never removed when you delete " +
+    "items — deleted photos are kept so an accidental deletion can be undone."));
+
+  const doPhoto = (label, fn, danger) => {
+    const b = el("button", "action-row" + (danger ? " danger" : ""), label);
+    b.style.flex = "1";
+    let b_busy = false;
+    b.onclick = async () => {
+      if (b_busy) return;
+      b_busy = true; b.disabled = true; b.style.opacity = "0.6";
+      const old = b.textContent; b.textContent = "Working…";
+      const msg = await fn();
+      b.textContent = old; b.disabled = false; b.style.opacity = "";
+      b_busy = false;
+      if (msg) openNotice("Photos", msg);
+      else { scrim.remove(); openBackups(); }
+    };
+    return b;
+  };
+  const pairRow = (a2, b2) => {
+    const r = el("div", "action-pair");
+    r.append(a2, b2);
+    return r;
+  };
+
+  // Row 1: Back up + Restore
+  rows.push(pairRow(
+    doPhoto("Back up photos now", async () => { await invoke("backup_photos"); return null; }),
+    doPhoto("Restore missing photos", async () => {
+      const n = await invoke("restore_missing_photos", { referenced: allReferencedPhotos() });
+      return n > 0
+        ? `Restored ${n} missing photo(s) from the archive.`
+        : "No missing photos to restore — everything referenced is already present.";
+    })
+  ));
+
+  // Row 2: Purge (red, always visible; disabled when nothing is retained) + Open archive
+  const openArch = el("button", "action-row", "Open archive folder");
+  openArch.style.flex = "1";
+  openArch.onclick = () => invoke("open_photo_archive");
+  const purge = doPhoto("Purge deleted (30+ days)", async () => {
+    const n = await invoke("purge_deleted_photos", { days: 30 });
+    return n > 0 ? `Permanently removed ${n} old deleted photo(s).`
+                 : "Nothing old enough to purge yet (30-day grace period).";
+  }, true);
+  if (!status.deleted_pending) {
+    purge.disabled = true;
+    purge.style.opacity = "0.5";
+    purge.style.cursor = "default";
+    purge.title = "No deleted photos are being retained yet";
+  }
+  rows.push(pairRow(purge, openArch));
+  rows.push(el("div", "separator"));
+  rows.push(sub("Database snapshots"));
   if (!backups.length) rows.push(el("div", "muted", "No snapshots yet."));
   backups.forEach((b) => {
     const r = el("div", "template-row");
