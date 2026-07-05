@@ -143,7 +143,7 @@ body {
 .coll-row.selected .icon-chip { background: var(--accent-dim); }
 .icon-chip:hover { border-color: var(--accent); }
 .coll-row .names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.coll-row .name { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coll-row .name { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; padding-bottom: 1px; }
 .coll-row.selected .name { color: var(--text-primary); font-family: "Noto Sans CJK SC"; font-weight: 700; }
 .coll-row .count { font-size: max(calc(var(--fs) - 3px), 10px); color: var(--text-muted); }
 
@@ -164,7 +164,7 @@ body {
   display: flex; align-items: center; justify-content: center; font-size: 22px; flex: none;
 }
 .item-card .names { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.item-card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-card .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.35; padding-bottom: 1px; }
 .item-card .desc {
   font-size: calc(var(--fs) - 1px); color: var(--text-muted);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -211,6 +211,7 @@ body {
 .detail-title {
   font-family: "Noto Sans CJK SC"; font-weight: 700; font-size: calc(var(--fs) + 1px);
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.4; padding-bottom: 1px;
 }
 .text-btn {
   border: 0; background: transparent; border-radius: 6px; padding: 4px 8px;
