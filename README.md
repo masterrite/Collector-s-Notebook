@@ -16,8 +16,8 @@ The traveler's notebook is basically a piece of leather wrapped around papers. T
 ---
 
 <p align="center">
-    <img height="512" alt="image" src="https://github.com/user-attachments/assets/355885ed-57bd-4b26-84f4-d6b091cddde3" />
-    <img height="512" alt="image" src="https://github.com/user-attachments/assets/4f65f8fb-e6ab-47de-9054-da6aa6a29353" />
+    <img height="512" alt="image" src="https://github.com/user-attachments/assets/8e7048e2-5ad8-4381-9eda-c7522c2793d2" />
+    <img height="512" alt="image" src="https://github.com/user-attachments/assets/833db2c6-6db8-4dbf-9f47-1ad492f3c80e" />
     <br>
     <sub>Click to enlarge</sub>
 </p>
@@ -36,12 +36,12 @@ The traveler's notebook is basically a piece of leather wrapped around papers. T
 - Simplified Chinese, Japanese, and Korean support for input texts (no UI translation)
 - Small size! Less than 30 MB depends on how you build it, and can go down to ~22 MB on Windows
 
-## New in v2.0!!!
+## New in v3.0!!!
 
-v2.0 is a full migration from Slint UI to Iced UI. This should bring improvements such as:
-- New architecture
-- Actual scrollable multi-line fields, no word limit. The fields can still enlarge to a viewable, editable panel, of course. Enlarging automatically enters edit mode in the right panel
-- Emoji don't clip at any font size anymore. True rendering of full-color emoji in Noto Color Emoji fonts
+v3.0 is a full migration from Iced UI to Tauri. This should bring more improvements:
+- Correct textboxes and hot keys
+- Better compatibiliy across systems
+- Smaller RAM usage (~90% less with my own collection), footprint
 
 Hopefully everything else is preserved.
 
@@ -50,21 +50,36 @@ Hopefully everything else is preserved.
 ## Project Structure
 
 ```
-collector/
-├── Cargo.toml
-├── build.rs
-├── assets/
-│   ├── fonts            # Embeded Simplified Chinese, Japanese, and Korean font
-│   ├── icons            # Hand drawn icons by yours truly
-│   └── logo.png    	 # For the title bar logo and settings
-└── src/
-    ├── main.rs
-    ├── image_util.rs
-    ├── model.rs
-    ├── theme.rs
-    ├── update.rs
-    └── view.rs
-
+collectors-notebook/
+├─ .github/
+│  └─ workflows/
+│     └─ rust.yaml            # CI: builds Win/macOS/Linux, attaches to Releases on a version tag
+├─ .gitignore
+├─ ui/                        # frontend — embedded into the binary at build time
+│  ├─ index.html              #   app shell
+│  ├─ styles.css              #   the palette + all component styling
+│  ├─ app.js                  #   the entire UI state machine (ported from the old update.rs/view.rs)
+│  └─ fonts/                  #   bundled fonts (see "Fonts" below) — YOU add these
+│     ├─ NotoSans-Regular.ttf
+│     ├─ NotoSansCJK-Regular-subset.otf
+│     └─ NotoSansCJK-Bold-subset.otf
+└─ src-tauri/                 # backend + app config
+   ├─ Cargo.toml              #   Rust dependencies
+   ├─ Cargo.lock              #   pinned versions (COMMIT THIS)
+   ├─ build.rs                #   three-line tauri-build hook
+   ├─ tauri.conf.json         #   app config: window, identifier, bundle targets, icons
+   ├─ capabilities/
+   │  └─ default.json         #   permission set granted to the window
+   ├─ icons/                  #   app icons — generated once, then committed (see "Icons")
+   │  ├─ 32x32.png
+   │  ├─ 128x128.png
+   │  ├─ 128x128@2x.png
+   │  ├─ icon.icns            #   macOS (required by the bundler)
+   │  └─ icon.ico             #   Windows (required by the bundler)
+   └─ src/
+      ├─ main.rs              #   Tauri commands: load/save, photos, dialogs, backups
+      ├─ model.rs             #   data types + persistence (shared, unchanged core)
+      └─ image_util.rs        #   thumbnails, photo file management, base64 delivery
 ```
 
 ---
@@ -73,14 +88,40 @@ collector/
 
 ### Prerequisites
 
-- **Rust stable** — https://rustup.rs
-- **Linux extras**: `sudo apt install libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig1-dev libfreetype6-dev`
-- macOS / Windows: no extras needed
+- **Rust** (stable, 1.88+): <https://rustup.rs>
+- **Tauri CLI 2.x.** Install the prebuilt binary (seconds) rather than
+  compiling it:
+  ```sh
+  cargo install cargo-binstall
+  cargo binstall tauri-cli
+  ```
+  Verify: `cargo tauri --version` prints a 2.x version.
+- **Platform toolchains:**
+  - Windows: MSVC Build Tools; WebView2 ships with Win 10/11.
+  - macOS: Xcode Command Line Tools (`xcode-select --install`).
+  - Linux: the WebKitGTK stack —
+    ```sh
+    sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+    ```
 
-```bash
-cd collector
-cargo run              # development
-cargo build --release  # → target/release/collector
+### Building and Packaging
+
+`cargo tauri build` writes bundles under
+`src-tauri/target/release/bundle/`. Defaults per platform:
+
+| Platform | Output | Location |
+|---|---|---|
+| Windows | NSIS installer `*-setup.exe` (+ portable `collectors-notebook.exe` one level up) | `bundle/nsis/` |
+| macOS | `.dmg` (contains a proper `.app`) | `bundle/dmg/` |
+| Linux | `.AppImage` (self-contained) and/or `.deb` | `bundle/appimage/`, `bundle/deb/` |
+
+Pick specific formats with `--bundles`, e.g.:
+
+```sh
+cargo tauri build --bundles msi          # Windows MSI
+cargo tauri build --bundles appimage,deb # Linux: both
+cargo tauri build --bundles app,dmg      # macOS
 ```
 
 ---
@@ -101,20 +142,6 @@ Two files are written: `data.json` (collections + items) and `settings.json` (th
 
 Export writes the full `AppData` JSON to `~/Documents/collector-export.json`.  
 Import reads from the same path and **merges** — existing items (matched by UUID) are not overwritten, so you can safely import old backups without losing edits.
-
----
-
-## Packaging
-
-```bash
-# Linux AppImage / .deb
-cargo install cargo-bundle && cargo bundle --release
-
-# macOS .app
-cargo bundle --release   # → target/release/bundle/osx/Collector.app
-
-# Windows: the .exe is already standalone
-```
 
 ---
 
