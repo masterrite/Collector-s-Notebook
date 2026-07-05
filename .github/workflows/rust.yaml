@@ -2,18 +2,17 @@ name: Build
 # Build Tauri bundles for Windows, macOS, and Linux.
 #
 # Triggers:
-#   - on every push to main / pull request: builds all (CI check)
-#   - on pushing a version tag like v1.0.0: builds all AND attaches
-#     the bundles to a GitHub Release.
+#   - push to main / PR: builds all (CI check)
+#   - push a version tag v*: builds all AND attaches bundles to a Release
 #
-# Ship vehicles per platform (what `cargo tauri build` produces):
-#   Windows: NSIS installer (*-setup.exe) + the portable exe
-#   macOS:   .dmg (proper .app inside — no hand-rolled Info.plist needed)
-#   Linux:   AppImage (self-contained; a raw binary would need system webkit)
+# IMPORTANT: this workflow REPLACES the original pre-Tauri one. The old file
+# ran `cargo build` and never installed tauri-cli — it only "worked" when a
+# stale cache happened to still contain the CLI. This version installs the CLI
+# explicitly every run (see "Install tauri-cli"), so `cargo tauri` is always
+# present regardless of cache state.
 #
-# Requirements committed to the repo:
-#   - src-tauri/icons/ must contain the full icon set (run `cargo tauri icon`
-#     once locally and commit it) — the macOS/Windows bundlers hard-require it.
+# Prereq committed to the repo: src-tauri/icons/ (run `cargo tauri icon` once
+# locally and commit) — the macOS/Windows bundlers hard-require icon.icns/.ico.
 on:
   push:
     branches: [main]
@@ -38,10 +37,10 @@ jobs:
             asset_installer: Collectors-Notebook-windows-x86_64.msi
             asset_portable: Collectors-Notebook-windows-x86_64-portable.exe
           - os: macos-latest
-            target: aarch64-apple-darwin        # Apple Silicon (M1+)
+            target: aarch64-apple-darwin
             asset: Collectors-Notebook-macos-arm64.dmg
           - os: macos-15-intel
-            target: x86_64-apple-darwin          # Intel Macs
+            target: x86_64-apple-darwin
             asset: Collectors-Notebook-macos-x86_64.dmg
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -56,19 +55,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Rust build cache. This purpose-built action keys on the toolchain +
-      # Cargo.lock, caches the registry and target/ dir, and prunes stale
-      # artifacts on its own — far more reliable than a hand-rolled
-      # actions/cache. `workspaces` points it at where Cargo.toml lives.
-      # `key` adds the target triple so each matrix leg caches separately.
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
           key: ${{ matrix.target }}
 
-      # Tauri v2 Linux stack: webview + tray/menu/rsvg support. This replaces
-      # the old winit/fontconfig list entirely.
+      # Tauri v2 Linux stack (webview + tray/rsvg). Replaces the old
+      # winit/GTK3 list entirely.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -82,15 +76,19 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
-      # Prebuilt CLI in seconds (compiling tauri-cli would cost ~10 minutes).
+      # Install the Tauri CLI EXPLICITLY, every run. binstall grabs a prebuilt
+      # binary in seconds; the `|| cargo install` fallback compiles it if no
+      # prebuilt exists for the platform, so this step can't silently no-op.
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install tauri-cli
-        run: cargo binstall tauri-cli --locked --no-confirm
+        run: |
+          cargo binstall tauri-cli --version "^2" --locked --no-confirm \
+            || cargo install tauri-cli --version "^2" --locked
+          cargo tauri --version   # fail loudly here if it's somehow missing
 
-      # Windows: WiX MSI instead of NSIS (NSIS 3.11 breaks Tauri's installer
-      # template with the "NSISCOMCALL requires 4 parameters, passed 7" error).
+      # Windows: WiX MSI (NSIS 3.11 breaks Tauri's installer template).
       - name: Build bundles (Windows / MSI)
         if: runner.os == 'Windows'
         run: cargo tauri build --target ${{ matrix.target }} --bundles msi
@@ -99,7 +97,6 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo tauri build --target ${{ matrix.target }}
 
-      # -- Stage: rename Tauri's versioned bundle names to stable asset names --
       - name: Stage (Linux AppImage)
         if: runner.os == 'Linux'
         run: |
