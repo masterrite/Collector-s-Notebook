@@ -1,18 +1,5 @@
 name: Build
 # Build Tauri bundles for Windows, macOS, and Linux.
-#
-# Triggers:
-#   - push to main / PR: builds all (CI check)
-#   - push a version tag v*: builds all AND attaches bundles to a Release
-#
-# IMPORTANT: this workflow REPLACES the original pre-Tauri one. The old file
-# ran `cargo build` and never installed tauri-cli — it only "worked" when a
-# stale cache happened to still contain the CLI. This version installs the CLI
-# explicitly every run (see "Install tauri-cli"), so `cargo tauri` is always
-# present regardless of cache state.
-#
-# Prereq committed to the repo: src-tauri/icons/ (run `cargo tauri icon` once
-# locally and commit) — the macOS/Windows bundlers hard-require icon.icns/.ico.
 on:
   push:
     branches: [main]
@@ -61,34 +48,23 @@ jobs:
           workspaces: src-tauri
           key: ${{ matrix.target }}
 
-      # Tauri v2 Linux stack (webview + tray/rsvg). Replaces the old
-      # winit/GTK3 list entirely.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl wget file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
+          sudo apt-get install -y \\
+            libwebkit2gtk-4.1-dev build-essential curl wget file \\
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      # Install the Tauri CLI EXPLICITLY, every run. binstall grabs a prebuilt
-      # binary in seconds; the `|| cargo install` fallback compiles it if no
-      # prebuilt exists for the platform, so this step can't silently no-op.
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@main
 
       - name: Install tauri-cli
         run: |
-          cargo binstall tauri-cli --version "^2" --locked --no-confirm \
+          cargo binstall tauri-cli --version "^2" --locked --no-confirm \\
             || cargo install tauri-cli --version "^2" --locked
-          cargo tauri --version   # fail loudly here if it's somehow missing
+          cargo tauri --version
 
-      # Windows: WiX MSI (NSIS 3.11 breaks Tauri's installer template).
       - name: Build bundles (Windows / MSI)
         if: runner.os == 'Windows'
         run: cargo tauri build --target ${{ matrix.target }} --bundles msi
@@ -110,13 +86,23 @@ jobs:
           mkdir -p dist
           cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg "dist/${{ matrix.asset }}"
 
+      # The MSI is named "Collector's Notebook_3.0.0_x64_en-US.msi" — the
+      # apostrophe broke the previous glob copy silently, so nothing landed in
+      # dist/ and the release had no Windows asset. Resolve the file via
+      # Get-ChildItem (handles the apostrophe as data, not a quote) and FAIL
+      # LOUDLY if it isn't found instead of uploading nothing.
       - name: Stage (Windows installer + portable exe)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi" "dist/${{ matrix.asset_installer }}"
-          Copy-Item "src-tauri/target/${{ matrix.target }}/release/collectors-notebook.exe" "dist/${{ matrix.asset_portable }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $msi = Get-ChildItem -LiteralPath "src-tauri/target/${{ matrix.target }}/release/bundle/msi" -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error "No MSI found in bundle/msi"; exit 1 }
+          Copy-Item -LiteralPath $msi.FullName -Destination "dist/${{ matrix.asset_installer }}"
+          $exe = "src-tauri/target/${{ matrix.target }}/release/collectors-notebook.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { Write-Error "Portable exe missing"; exit 1 }
+          Copy-Item -LiteralPath $exe -Destination "dist/${{ matrix.asset_portable }}"
+          Get-ChildItem dist   # log what we staged
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
