@@ -20,11 +20,11 @@ const S = {
   namePurpose: null, // {kind:'coll'|'item'|'template', id}
   dragSplit: 0,
 };
-const SORTS = ["Added", "NameAsc", "NameDesc", "LowOrOld", "HighOrNew"];
+const SORTS = ["added", "name-asc", "name-desc", "low-or-old", "high-or-new"];
 const sortLabel = (m, isColl) => ({
-  Added: "Date added", NameAsc: "Name A–Z", NameDesc: "Name Z–A",
-  LowOrOld: isColl ? "Fewest items" : "Oldest first",
-  HighOrNew: isColl ? "Most items" : "Newest first",
+  "added": "Date added", "name-asc": "Name A–Z", "name-desc": "Name Z–A",
+  "low-or-old": isColl ? "Fewest items" : "Oldest first",
+  "high-or-new": isColl ? "Most items" : "Newest first",
 }[m]);
 const ICONS = ["🚗","📁","🎧","🖊","📷","🎮","📚","⌚","💍","🎸","🎨","🏆","🎯","🔬","🚀","🌿",
   "🍷","⚽","🎲","💎","🖥","📻","🎺","🎻","🏺","💰","🔑","🔧","🔭","🎁","🚲","🌱",
@@ -37,6 +37,15 @@ const el = (tag, cls, text) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
   if (text !== undefined) n.textContent = text;
+  if (tag === "input") {
+    // Turn off the webview's native autofill/suggestion dropdown. It guesses at
+    // name/date fields and its suggestions interfered with saving edited values.
+    n.setAttribute("autocomplete", "off");
+    n.setAttribute("autocorrect", "off");
+    n.setAttribute("autocapitalize", "off");
+    n.setAttribute("spellcheck", "false");
+    n.setAttribute("data-form-type", "other"); // hint some autofill engines respect
+  }
   return n;
 };
 const newId = () => crypto.randomUUID();
@@ -108,10 +117,10 @@ function sortItemsInPlace(arr, mode) {
     if (!b) return -1;
     return asc ? a.localeCompare(b) : b.localeCompare(a);
   };
-  if (mode === "NameAsc") arr.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-  else if (mode === "NameDesc") arr.sort((a, b) => b.name.toLowerCase().localeCompare(a.name.toLowerCase()));
-  else if (mode === "LowOrOld") arr.sort((a, b) => cmpDates(a.acquired_date, b.acquired_date, true));
-  else if (mode === "HighOrNew") arr.sort((a, b) => cmpDates(a.acquired_date, b.acquired_date, false));
+  if (mode === "name-asc") arr.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  else if (mode === "name-desc") arr.sort((a, b) => b.name.toLowerCase().localeCompare(a.name.toLowerCase()));
+  else if (mode === "low-or-old") arr.sort((a, b) => cmpDates(a.acquired_date, b.acquired_date, true));
+  else if (mode === "high-or-new") arr.sort((a, b) => cmpDates(a.acquired_date, b.acquired_date, false));
 }
 function filteredItems() {
   if (!S.selColl) return [];
@@ -126,12 +135,12 @@ function filteredItems() {
 }
 function sortCollectionsInPlace(mode) {
   const c = S.data.collections;
-  if (mode === "Added") c.sort((a, b) => (a.order || 0) - (b.order || 0));
-  else if (mode === "NameAsc") c.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-  else if (mode === "NameDesc") c.sort((a, b) => b.name.toLowerCase().localeCompare(a.name.toLowerCase()));
+  if (mode === "added") c.sort((a, b) => (a.order || 0) - (b.order || 0));
+  else if (mode === "name-asc") c.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  else if (mode === "name-desc") c.sort((a, b) => b.name.toLowerCase().localeCompare(a.name.toLowerCase()));
   else {
     const counts = Object.fromEntries(c.map((x) => [x.id, itemCount(x.id)]));
-    c.sort((a, b) => mode === "LowOrOld" ? counts[a.id] - counts[b.id] : counts[b.id] - counts[a.id]);
+    c.sort((a, b) => mode === "low-or-old" ? counts[a.id] - counts[b.id] : counts[b.id] - counts[a.id]);
   }
 }
 const selectedItem = () => S.data.items.find((i) => i.id === S.selItem) || null;
