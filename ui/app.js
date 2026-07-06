@@ -151,6 +151,17 @@ const defaultFields = () =>
 const persist = () => invoke("save_data_cmd", { data: S.data });
 const persistSettings = () => invoke("save_settings_cmd", { settings: S.settings });
 
+// Debounced autosave for in-progress edits. Live edits write to the model on
+// each keystroke, but if the webview is suspended while idle (WebView2 can
+// discard an inactive view and reload from disk on resume), only what reached
+// disk survives. Persisting shortly after typing stops closes that gap so an
+// idle-suspend can't eat unsaved text. Trailing debounce keeps it cheap.
+let _persistTimer = null;
+const persistSoon = () => {
+  if (_persistTimer) clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => { _persistTimer = null; persist(); }, 600);
+};
+
 // ─── thumbnails (async, cached) ──────────────────────────────────────────────
 const thumbCache = new Map();
 function setThumbBg(divEl, name) {
@@ -571,6 +582,15 @@ function renderItems() {
 }
 function renderDetail() {
   const it = selectedItem();
+  // While editing, if focus is inside the detail panel, don't tear down and
+  // rebuild it — that would drop the user's focus/caret mid-type (and, before
+  // live-binding, could clear unsaved text). The inputs write straight to the
+  // model on input, so the panel is already up to date; skip the rebuild.
+  if (S.isEditing && it) {
+    const root0 = $("detail");
+    const af = document.activeElement;
+    if (root0 && af && root0.contains(af) && af.matches("input, textarea")) return;
+  }
   $("detail-empty").classList.toggle("hidden", !!it);
   const root = $("detail");
   root.classList.toggle("hidden", !it);
@@ -608,6 +628,10 @@ function renderDetail() {
     E ? (v) => { $("ed-name").value = v.replace(/\n/g, " "); } : null)));
   if (E) {
     const inp = el("input", "value-input"); inp.id = "ed-name"; inp.value = it.name;
+    // Write to the model on every keystroke. renderDetail() rebuilds this input
+    // from it.name, so if the model lagged the DOM a redraw would wipe what you
+    // typed. Keeping them in sync makes any redraw reproduce the same text.
+    inp.addEventListener("input", () => { it.name = inp.value.replace(/\n+$/, ""); persistSoon(); });
     col.appendChild(inp);
   } else col.appendChild(valueView(it.name));
   col.appendChild(subRow("Description", () => openEnlarge("Description",
@@ -615,6 +639,7 @@ function renderDetail() {
     E ? (v) => { $("ed-desc").value = v; } : null)));
   if (E) {
     const ta = el("textarea", "value-area"); ta.id = "ed-desc"; ta.rows = 3; ta.value = it.short_desc;
+    ta.addEventListener("input", () => { it.short_desc = ta.value.replace(/\n+$/, ""); persistSoon(); });
     col.appendChild(ta);
   } else col.appendChild(valueView(it.short_desc));
   prow.appendChild(col);
@@ -656,7 +681,15 @@ function renderDetail() {
     const mk = (id, v, ph, cls, max) => {
       const i2 = el("input", "value-input date-in " + cls);
       i2.id = id; i2.value = v; i2.placeholder = ph;
-      i2.addEventListener("input", () => { i2.value = keepDigits(i2.value, max); });
+      i2.addEventListener("input", () => {
+        i2.value = keepDigits(i2.value, max);
+        const yy = $("ed-y"), mm = $("ed-m"), dd = $("ed-d");
+        if (yy && mm && dd) {
+          it.acquired_date = assembleDate(
+            keepDigits(yy.value, 4), keepDigits(mm.value, 2), keepDigits(dd.value, 2));
+          persistSoon();
+        }
+      });
       return i2;
     };
     dr.append(mk("ed-y", y, "YYYY", "", 4), el("span", "muted", "–"),
@@ -677,6 +710,7 @@ function renderDetail() {
     if (E) {
       const lr = el("div", "labelrow");
       const li = el("input", "label-input"); li.value = f.label; li.dataset.flabel = f.id;
+      li.addEventListener("input", () => { f.label = li.value.replace(/\n+$/, ""); persistSoon(); });
       const en = el("button", "enlarge-link", "Enlarge");
       en.style.position = "static"; en.style.transform = "none";
       en.onclick = () => openEnlarge(f.label || "Field",
@@ -687,6 +721,7 @@ function renderDetail() {
       lr.append(li, en, rx);
       fb.appendChild(lr);
       const ta = el("textarea", "value-area"); ta.rows = 2; ta.value = f.value; ta.dataset.fvalue = f.id;
+      ta.addEventListener("input", () => { f.value = ta.value.replace(/\n+$/, ""); persistSoon(); });
       fb.appendChild(ta);
     } else {
       const lr = el("div", "sub-row");
@@ -1476,6 +1511,22 @@ async function init() {
   initSearch("item-search", "itemSearch", () => { rebuildItemChecked(); renderItems(); });
   initSplitters();
   initKeys();
+
+  // Save the moment the view is hidden (tab/window backgrounded, or the webview
+  // about to be suspended while idle). This flushes any in-progress edit to disk
+  // before WebView2 can discard the page state, so returning after idle shows
+  // your text rather than the last explicitly-saved version. `pagehide` covers
+  // the harder suspend/unload case that visibilitychange can miss.
+  const flushToDisk = () => {
+    if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+    if (S.isEditing && S.selItem) flushEditors();
+    persist();
+  };
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushToDisk();
+  });
+  window.addEventListener("pagehide", flushToDisk);
+
   renderAll();
 }
 init();
