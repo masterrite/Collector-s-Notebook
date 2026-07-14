@@ -1,6 +1,6 @@
 [package]
 name = "collectors-notebook"
-version = "3.0.3"
+version = "3.0.4"
 edition = "2021"
 rust-version = "1.88"
 description = "Collector's Notebook"
@@ -17,6 +17,7 @@ dirs = "6"
 rfd = "0.17"
 image = "0.25"
 base64 = "0.22"
+arboard = "3"
 
 [profile.release]
 # opt-level = "z"
