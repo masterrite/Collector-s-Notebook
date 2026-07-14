@@ -4,6 +4,13 @@
 "use strict";
 const invoke = window.__TAURI__.core.invoke;
 
+// Clipboard via native Rust commands (see main.rs). Using invoke instead of
+// navigator.clipboard avoids the webview's "wants to see clipboard" permission
+// dialog, and instead of the clipboard-manager JS bindings avoids depending on
+// withGlobalTauri exposing them.
+const readClipboardText = () => invoke("clipboard_read").catch(() => "");
+const writeClipboardText = (t) => invoke("clipboard_write", { text: t }).catch(() => {});
+
 // ─── state (the iced App struct) ────────────────────────────────────────────
 const S = {
   data: { collections: [], items: [], templates: [] },
@@ -824,6 +831,47 @@ function closeOverlays() {
   document.querySelectorAll(".ctx-menu").forEach((n) => n.remove());
 }
 
+// Minimal right-click menu for text inputs/textareas: Copy, Paste, Select All.
+// Replaces the webview's native menu (which is suppressed everywhere) so the
+// only menus in the app are ones we control. Uses execCommand, which keeps the
+// field's native undo stack intact; paste falls back to the async clipboard API
+// where execCommand("paste") is blocked.
+function openTextContextMenu(field, x, y) {
+  closeOverlays();
+  const hasSelection = field.selectionStart !== field.selectionEnd;
+  const menu = el("div", "ctx-menu");
+  const mk = (label, enabled, fn) => {
+    const b = el("button", "ctx-item" + (enabled ? "" : " disabled"), label);
+    if (enabled) b.onclick = () => { closeOverlays(); field.focus(); fn(); };
+    else { b.disabled = true; b.style.opacity = "0.4"; b.style.cursor = "default"; }
+    menu.appendChild(b);
+  };
+  mk("Copy", hasSelection, () => {
+    const sel = field.value.substring(field.selectionStart, field.selectionEnd);
+    if (sel) writeClipboardText(sel);
+  });
+  mk("Paste", !field.readOnly && !field.disabled, async () => {
+    // Read via the Tauri clipboard plugin (native, no webview permission
+    // prompt) and insert at the caret. We intentionally do NOT use
+    // navigator.clipboard here — in the webview that triggers a "wants to see
+    // clipboard" allow/block dialog. setRangeText keeps the field's own value
+    // and fires input so autosave/live-binding pick it up.
+    try {
+      const text = await readClipboardText();
+      if (text) {
+        const s = field.selectionStart, e = field.selectionEnd;
+        field.setRangeText(text, s, e, "end");
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } catch { /* clipboard unavailable */ }
+  });
+  mk("Select All", field.value.length > 0, () => { field.select(); });
+  document.body.appendChild(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.max(0, Math.min(x, innerWidth - r.width - 8)) + "px";
+  menu.style.top = Math.max(0, Math.min(y, innerHeight - r.height - 8)) + "px";
+}
+
 // ─── modals ──────────────────────────────────────────────────────────────────
 function modal(children, { width } = {}) {
   const scrim = el("div", "scrim");
@@ -1480,12 +1528,37 @@ function initKeys() {
       if (e.key === "ArrowLeft") lightboxStep(-1);
       if (e.key === "ArrowRight") lightboxStep(1);
     }
+    // Suppress the webview's built-in browser shortcuts this app never mapped.
+    // Typing in a field is preserved for the letter-based ones; zoom and reload
+    // keys are blocked everywhere (they don't insert text). DevTools (F12 /
+    // Ctrl+Shift+I) is intentionally left working for the dev build.
+    const typing = e.target.closest("input, textarea");
+    const k = e.key.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+    // find, find-next, print, reload, open, view-source, history nav
+    if (mod && !typing && ["f", "g", "p", "r", "o", "u", "j", "h"].includes(k)) {
+      e.preventDefault(); return;
+    }
+    // page zoom: Ctrl +/-/0 — block regardless of focus
+    if (mod && ["=", "-", "+", "0"].includes(k)) { e.preventDefault(); return; }
+    // reload / find via function keys
+    if (k === "f5" || k === "f3") { e.preventDefault(); return; }
   });
+  // Block Ctrl/Cmd + mouse-wheel page zoom (a webview default), except inside
+  // the lightbox where the wheel is the app's own zoom control.
+  window.addEventListener("wheel", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !S.lightbox.open) e.preventDefault();
+  }, { passive: false });
   document.addEventListener("click", () => closeOverlays());
   document.addEventListener("contextmenu", (e) => {
-    // Block the webview's native menu app-wide (keep it in text fields for
-    // paste); right-click outside a row also dismisses our menu.
-    if (!e.shiftKey && !e.target.closest("input, textarea")) e.preventDefault();
+    // Block the webview's native menu app-wide. On a text field, show our own
+    // Copy/Paste/Select All menu instead; elsewhere just dismiss any open menu.
+    e.preventDefault();
+    const field = e.target.closest("input, textarea");
+    if (field) {
+      openTextContextMenu(field, e.clientX, e.clientY);
+      return;
+    }
     if (!e.target.closest("[data-kind]")) closeOverlays();
   });
 }
