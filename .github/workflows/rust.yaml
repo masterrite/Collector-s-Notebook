@@ -1,19 +1,15 @@
 name: Build
 # Build Tauri bundles for Windows, macOS, and Linux.
 #
-# Triggers:
-#   - push to main / PR: builds all (CI check)
-#   - push a version tag v*: builds all AND attaches bundles to a Release
+# Trigger: ONLY when a version tag v* is pushed/created (e.g. v3.0.5, or a new
+# release made on GitHub with a new tag). Builds all platforms and attaches the
+# bundles to that tag's Release. Commits to main and PRs do not build.
 #
 # Prereq committed to the repo: src-tauri/icons/ (run `cargo tauri icon` once
 # locally and commit) — the macOS/Windows bundlers require icon.icns/.ico.
 on:
   push:
-    branches: [main]
     tags: ['v*']
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -76,9 +72,28 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo tauri build --target ${{ matrix.target }} --bundles msi
 
+      # Retry up to 3 times: on GitHub's macOS runners, the dmg step
+      # (bundle_dmg.sh → hdiutil) sometimes fails with "couldn't eject disk -
+      # Resource busy" because the OS is still indexing the temporary disk
+      # image. It's a runner hiccup, not a code problem. Retries are quick
+      # because the compiled app is reused; only the bundling is redone.
       - name: Build bundles (macOS / Linux)
         if: runner.os != 'Windows'
-        run: cargo tauri build --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo tauri build --target ${{ matrix.target }}; then
+              exit 0
+            fi
+            echo "::warning::Bundling failed (attempt $attempt of 3), retrying..."
+            # clear any half-made dmg and mounted volumes before retrying
+            rm -rf src-tauri/target/${{ matrix.target }}/release/bundle/dmg || true
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              for v in /Volumes/*Notebook*; do [ -d "$v" ] && hdiutil detach "$v" -force || true; done
+            fi
+            sleep 15
+          done
+          exit 1
 
       - name: Stage (Linux AppImage)
         if: runner.os == 'Linux'
