@@ -1507,7 +1507,20 @@ function initKeys() {
   document.addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      if (S.isEditing && S.selItem) { flushEditors(); persist(); }
+      if (S.isEditing && S.selItem) {
+        // Quiet save: stay in edit mode, keep focus/cursor where it is.
+        flushEditors(); persist();
+        // Refresh the middle-panel card (name, description, date, photo) and
+        // the detail header title so they reflect what was just saved.
+        // renderItems() only rebuilds the item list, so the edit inputs in
+        // the right panel are untouched.
+        const list = $("item-list"), scroll = list.scrollTop;
+        renderItems();
+        list.scrollTop = scroll; // rebuilding empties the list; keep position
+        const it = selectedItem();
+        const title = document.querySelector("#detail .detail-title");
+        if (it && title) title.textContent = it.name.trim() || "New Item";
+      }
       return;
     }
     if (e.key === "Escape") {
