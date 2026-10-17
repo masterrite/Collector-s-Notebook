@@ -35,6 +35,51 @@ pub fn thumb_path_for(stored: &str) -> PathBuf {
     thumbs_dir().join(format!("{name}.jpg"))
 }
 
+/// One-time cleanup for thumbnails written by older builds, which named them
+/// "<stem>.jpg" instead of the current "<full name>.jpg". Without this, a
+/// legacy "abc.jpg" sits next to a freshly regenerated "abc.jpg.jpg" forever,
+/// and the photo backup mirrors both. Legacy files are renamed to the current
+/// scheme when unambiguous, otherwise deleted (they'll be regenerated on
+/// demand). `photo_dirs` are the folders whose filenames these thumbs belong to.
+pub fn migrate_legacy_thumbs(thumbs: &Path, photo_dirs: &[PathBuf]) {
+    use std::collections::{HashMap, HashSet};
+    let mut names: HashSet<String> = HashSet::new();
+    for d in photo_dirs {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                if e.path().is_file() {
+                    names.insert(e.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    let mut stem_count: HashMap<String, usize> = HashMap::new();
+    for n in &names {
+        if let Some(s) = Path::new(n).file_stem().and_then(|s| s.to_str()) {
+            *stem_count.entry(s.to_string()).or_default() += 1;
+        }
+    }
+    for n in &names {
+        let Some(stem) = Path::new(n).file_stem().and_then(|s| s.to_str()) else { continue };
+        let legacy = thumbs.join(format!("{stem}.jpg"));
+        let current = thumbs.join(format!("{n}.jpg"));
+        // Same path (photo has no extension) or nothing to migrate.
+        if legacy == current || !legacy.exists() {
+            continue;
+        }
+        // "<stem>.jpg" is the *current* thumb of a photo literally named "<stem>".
+        if names.contains(stem) {
+            continue;
+        }
+        let ambiguous = stem_count.get(stem).copied().unwrap_or(0) > 1;
+        if current.exists() || ambiguous {
+            std::fs::remove_file(&legacy).ok();
+        } else {
+            std::fs::rename(&legacy, &current).ok();
+        }
+    }
+}
+
 pub fn generate_thumbnail(stored: &str) {
     if stored.is_empty() {
         return;

@@ -180,6 +180,13 @@ fn mirror_new(src: &std::path::Path, dst: &std::path::Path) -> u64 {
 #[tauri::command]
 fn backup_photos() -> u64 {
     let arch = photo_archive_dir();
+    // Normalise legacy "<stem>.jpg" thumbnails (live and archived) so the
+    // additive mirror doesn't keep both "<uuid>.jpg" and "<uuid>.jpg.jpg".
+    image_util::migrate_legacy_thumbs(&thumbs_dir(), &[photos_dir()]);
+    image_util::migrate_legacy_thumbs(
+        &arch.join("thumbnails"),
+        &[arch.join("photos"), arch.join("_deleted")],
+    );
     let a = mirror_new(&photos_dir(), &arch.join("photos"));
     let b = mirror_new(&thumbs_dir(), &arch.join("thumbnails"));
     a + b
@@ -314,13 +321,17 @@ fn purge_deleted_photos(days: u64) -> u64 {
                     if std::fs::remove_file(e.path()).is_ok() {
                         purged += 1;
                     }
-                    let thumb = photo_archive_dir()
-                        .join("thumbnails")
-                        .join(std::path::Path::new(&name)
-                            .with_extension("jpg")
-                            .file_name()
-                            .unwrap_or_default());
-                    std::fs::remove_file(thumb).ok();
+                    // Current naming is "<full name>.jpg" (see
+                    // image_util::thumb_path_for); also sweep the legacy
+                    // "<stem>.jpg" form left by older builds.
+                    let arch_thumbs = photo_archive_dir().join("thumbnails");
+                    std::fs::remove_file(arch_thumbs.join(format!("{name}.jpg"))).ok();
+                    if let Some(stem) = std::path::Path::new(&name).file_stem() {
+                        let legacy = format!("{}.jpg", stem.to_string_lossy());
+                        if legacy != name {
+                            std::fs::remove_file(arch_thumbs.join(legacy)).ok();
+                        }
+                    }
                 }
             }
         }
@@ -347,6 +358,7 @@ fn open_photo_archive() {
 #[tauri::command]
 fn load_all() -> LoadAll {
     backup_data_file();
+    image_util::migrate_legacy_thumbs(&thumbs_dir(), &[photos_dir()]);
     let settings = load_settings();
     let (mut data, corrupt) = load_data_reporting();
     sort_collections(&mut data, settings.coll_sort);
@@ -460,24 +472,6 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Read plain text from the system clipboard. Used by the custom text-field
-/// context menu's Paste. Going through Rust avoids the webview's
-/// navigator.clipboard permission prompt. Returns "" on any failure.
-#[tauri::command]
-fn clipboard_read() -> String {
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.get_text())
-        .unwrap_or_default()
-}
-
-/// Write plain text to the system clipboard (custom menu's Copy).
-#[tauri::command]
-fn clipboard_write(text: String) {
-    if let Ok(mut c) = arboard::Clipboard::new() {
-        c.set_text(text).ok();
-    }
-}
-
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -495,8 +489,6 @@ fn main() {
             import_data_cmd,
             open_data_folder,
             app_version,
-            clipboard_read,
-            clipboard_write,
             list_backups,
             backup_now,
             restore_backup,
